@@ -451,6 +451,7 @@ cJSON *chips_list_address_groupings()
 			  free(_addr); free(_amt); }
 		}
 	}
+	if (list_address_groupings) cJSON_Delete(list_address_groupings);
 	bet_dealloc_args(argc, &argv);
 	return addr_info;
 }
@@ -518,6 +519,7 @@ int32_t chips_if_tx_vin_of_tx(cJSON *txid, char *vin_tx_id)
 	decoded_raw_tx_info = chips_decode_raw_tx(raw_tx_info);
 	if (decoded_raw_tx_info == NULL) {
 		dlg_error("%s", bet_err_str(ERR_CHIPS_DECODE_TX));
+		cJSON_Delete(raw_tx_info);
 		return retval;
 	}
 
@@ -531,6 +533,8 @@ int32_t chips_if_tx_vin_of_tx(cJSON *txid, char *vin_tx_id)
 			break;
 		}
 	}
+	cJSON_Delete(raw_tx_info);
+	cJSON_Delete(decoded_raw_tx_info);
 	return retval;
 }
 cJSON *chips_find_parent_tx(int64_t block_height, char *vin_tx_id)
@@ -548,10 +552,14 @@ cJSON *chips_find_parent_tx(int64_t block_height, char *vin_tx_id)
 			tx = cJSON_GetObjectItem(block_info, "tx");
 			if (cJSON_GetArraySize(tx) > 1) {
 				for (int32_t j = 1; j < cJSON_GetArraySize(tx); j++) {
-					if (chips_if_tx_vin_of_tx(cJSON_GetArrayItem(tx, j), vin_tx_id) == 1)
-						return cJSON_GetArrayItem(tx, j);
+					if (chips_if_tx_vin_of_tx(cJSON_GetArrayItem(tx, j), vin_tx_id) == 1) {
+						cJSON *found = cJSON_Duplicate(cJSON_GetArrayItem(tx, j), 1);
+						cJSON_Delete(block_info);
+						return found;
+					}
 				}
 			}
+			cJSON_Delete(block_info);
 		}
 	}
 	return NULL;
@@ -574,9 +582,11 @@ cJSON *chips_get_vin_from_tx(char *txid)
 
 	vin = cJSON_GetObjectItem(decoded_tx_details, "vin");
 	if (cJSON_GetArraySize(vin) > 0) {
-		vin_tx_id = cJSON_GetArrayItem(vin, 0);
+		vin_tx_id = cJSON_Duplicate(cJSON_GetArrayItem(vin, 0), 1);
 	}
 end:
+	if (wallet_tx_details) cJSON_Delete(wallet_tx_details);
+	if (decoded_tx_details) cJSON_Delete(decoded_tx_details);
 	return vin_tx_id;
 }
 

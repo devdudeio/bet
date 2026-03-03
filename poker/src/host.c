@@ -402,6 +402,7 @@ int32_t bet_dcv_deck_init_info(cJSON *argjson, struct privatebet_info *bet, stru
 	// Nanomsg removed - no longer used
 	retval = OK;
 
+	cJSON_Delete(deck_init_info);
 	return retval;
 }
 
@@ -465,16 +466,22 @@ int32_t bet_player_join_req(cJSON *argjson, struct privatebet_info *bet, struct 
 	int32_t retval = OK;
 	cJSON *player_info = NULL;
 	char *uri = NULL;
+	int32_t gui_pid = jint(argjson, "gui_playerID");
+
+	if (gui_pid < 0 || gui_pid >= CARDS_MAXPLAYERS) {
+		dlg_error("Invalid gui_playerID: %d", gui_pid);
+		return ERR_INVALID_POS;
+	}
 
 	bet->numplayers = ++players_joined;
-	dcv_info.peerpubkeys[jint(argjson, "gui_playerID")] = jbits256(argjson, "pubkey");
+	dcv_info.peerpubkeys[gui_pid] = jbits256(argjson, "pubkey");
 
 	// Lightning Network support removed - uri handling no longer used
 
 	player_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(player_info, "method", "join_res");
 
-	cJSON_AddNumberToObject(player_info, "playerid", jint(argjson, "gui_playerID"));
+	cJSON_AddNumberToObject(player_info, "playerid", gui_pid);
 	jaddbits256(player_info, "pubkey", jbits256(argjson, "pubkey"));
 
 	// Lightning Network support removed - uri/type fields no longer added
@@ -483,12 +490,12 @@ int32_t bet_player_join_req(cJSON *argjson, struct privatebet_info *bet, struct 
 	cJSON_AddNumberToObject(player_info, "pos_status", pos_on_table_empty);
 	cJSON_AddStringToObject(player_info, "req_identifier", jstr(argjson, "req_identifier"));
 
-	player_seats_info[jint(argjson, "gui_playerID")].empty = 0;
-	player_seats_info[jint(argjson, "gui_playerID")].chips =
-		vars->funds[vars->req_id_to_player_id_mapping[jint(argjson, "gui_playerID")]];
+	player_seats_info[gui_pid].empty = 0;
+	player_seats_info[gui_pid].chips =
+		vars->funds[vars->req_id_to_player_id_mapping[gui_pid]];
 	if (jstr(argjson, "player_name") && (strlen(jstr(argjson, "player_name")) != 0)) {
-		snprintf(player_seats_info[jint(argjson, "gui_playerID")].seat_name,
-			 sizeof(player_seats_info[jint(argjson, "gui_playerID")].seat_name),
+		snprintf(player_seats_info[gui_pid].seat_name,
+			 sizeof(player_seats_info[gui_pid].seat_name),
 			 "%s", jstr(argjson, "player_name"));
 	}
 	cJSON *seats_info = NULL;
@@ -612,6 +619,7 @@ static int32_t bet_check_bvv_ready(struct privatebet_info *bet)
 	}
 	DLG_JSON(info, "%s\n", bvv_ready);
 // Nanomsg removed - no longer used
+	cJSON_Delete(bvv_ready);
 	return retval;
 }
 
@@ -994,7 +1002,7 @@ static cJSON *payout_tx_data_info(struct privatebet_info *bet, struct privatebet
 static int32_t bet_dcv_poker_winner(struct privatebet_info *bet, struct privatebet_vars *vars)
 {
 	int32_t retval = OK;
-	double dcv_commission = 0, dev_commission = 0, player_amounts[bet->maxplayers];
+	double dcv_commission = 0, dev_commission = 0, player_amounts[CARDS_MAXPLAYERS];
 	cJSON *payout_info = NULL, *dev_info = NULL, *dcv_info = NULL, *payout_tx_info = NULL, *data_info = NULL;
 	char *hex_str = NULL;
 
@@ -1355,7 +1363,6 @@ static int32_t bet_dcv_verify_tx(cJSON *argjson, struct privatebet_info *bet)
 	char *hex_data = NULL, *data = NULL;
 	cJSON *data_info = NULL, *tx_info = NULL;
 
-	tx_info = cJSON_CreateObject();
 	tx_info = cJSON_GetObjectItem(argjson, "tx_info");
 	if (tx_info == NULL)
 		return ERR_CHIPS_INVALID_TX;
@@ -1377,7 +1384,6 @@ static int32_t bet_dcv_verify_tx(cJSON *argjson, struct privatebet_info *bet)
 			goto end;
 		data = calloc(tx_data_size, sizeof(char));
 		hexstr_to_str(hex_data, data);
-		data_info = cJSON_CreateObject();
 		data_info = cJSON_Parse(data);
 		if (strcmp(table_id, jstr(data_info, "table_id")) == 0) {
 			if (strcmp(jstr(argjson, "id"), jstr(data_info, "player_id")) == 0) {
@@ -1410,7 +1416,7 @@ end:
 void bet_init_player_seats_info()
 {
 	for (int i = 0; i < max_players; i++) {
-		sprintf(player_seats_info[i].seat_name, "player%d", i + 1);
+		snprintf(player_seats_info[i].seat_name, sizeof(player_seats_info[i].seat_name), "player%d", i + 1);
 		player_seats_info[i].seat = i;
 		player_seats_info[i].chips = 0;
 		player_seats_info[i].empty = pos_on_table_empty;

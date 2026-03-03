@@ -400,6 +400,7 @@ int32_t join_table()
 	
 	if (!op_id_str) {
 		dlg_error("No operation ID returned from sendcurrency");
+		cJSON_Delete(op_id);
 		return ERR_SENDCURRENCY;
 	}
 
@@ -413,27 +414,36 @@ int32_t join_table()
 		       (0 == strcmp(jstr(jitem(op_id_info, 0), "status"), "executing") ||
 		        0 == strcmp(jstr(jitem(op_id_info, 0), "status"), "queued"))) {
 			sleep(2);
+			cJSON *prev = op_id_info;
 			op_id_info = get_z_getoperationstatus((char *)op_id_str);
+			cJSON_Delete(prev);
 		}
-		
-		if (!jitem(op_id_info, 0) || 
+
+		if (!jitem(op_id_info, 0) ||
 		    !jstr(jitem(op_id_info, 0), "status") ||
 		    0 != strcmp(jstr(jitem(op_id_info, 0), "status"), "success")) {
 			dlg_error("sendcurrency operation failed");
+			cJSON_Delete(op_id);
+			cJSON_Delete(op_id_info);
 			return ERR_SENDCURRENCY;
 		}
 
 		txid = jstr(jobj(jitem(op_id_info, 0), "result"), "txid");
 		if (!txid) {
 			dlg_error("Failed to get txid from operation result");
+			cJSON_Delete(op_id);
+			cJSON_Delete(op_id_info);
 			return ERR_SENDCURRENCY;
 		}
 		strncpy(player_config.txid, txid, sizeof(player_config.txid) - 1);
 		dlg_info("payin_tx: %s", player_config.txid);
 	} else {
 		dlg_error("Failed to get operation status");
+		cJSON_Delete(op_id);
 		return ERR_SENDCURRENCY;
 	}
+	cJSON_Delete(op_id);
+	cJSON_Delete(op_id_info);
 
 	// Step 2: Update player identity with join request info
 	// This allows dealer to discover which player wants to join which table
@@ -506,8 +516,14 @@ static void copy_table_to_struct_t(cJSON *t_table_info)
 	float_to_uint32_s(&player_t.big_blind, jdouble(t_table_info, "big_blind"));
 	float_to_uint32_s(&player_t.min_stake, jdouble(t_table_info, "min_stake"));
 	float_to_uint32_s(&player_t.max_stake, jdouble(t_table_info, "max_stake"));
-	snprintf(player_t.table_id, sizeof(player_t.table_id), "%s", jstr(t_table_info, "table_id"));
-	snprintf(player_t.dealer_id, sizeof(player_t.dealer_id), "%s", jstr(t_table_info, "dealer_id"));
+	const char *tid = jstr(t_table_info, "table_id");
+	const char *did = jstr(t_table_info, "dealer_id");
+	if (!tid || !did) {
+		dlg_error("Missing table_id or dealer_id in table info");
+		return;
+	}
+	snprintf(player_t.table_id, sizeof(player_t.table_id), "%s", tid);
+	snprintf(player_t.dealer_id, sizeof(player_t.dealer_id), "%s", did);
 	
 	// Set start_block for height-filtered reads
 	player_t.start_block = jint(t_table_info, "start_block");
@@ -520,11 +536,12 @@ int32_t chose_table()
 	int32_t retval = OK;
 	cJSON *t_table_info = NULL, *dealer_ids = NULL;
 
-	t_table_info = cJSON_CreateObject();
+	t_table_info = NULL;
 	retval = check_if_d_t_available(player_config.dealer_id, player_config.table_id, &t_table_info);
 	if (retval == OK) {
 		copy_table_to_struct_t(t_table_info);
 		dlg_info("Configured Dealer ::%s, Table ::%s are chosen", player_t.dealer_id, player_t.table_id);
+		if (t_table_info) cJSON_Delete(t_table_info);
 		return retval;
 	}
 
@@ -547,9 +564,12 @@ int32_t chose_table()
 			player_config.table_id[sizeof(player_config.table_id) - 1] = '\0';
 			copy_table_to_struct_t(t_table_info);
 			dlg_info("Available Dealer ::%s, Table ::%s are chosen", player_t.dealer_id, player_t.table_id);
+			cJSON_Delete(t_table_info);
+			cJSON_Delete(dealer_ids);
 			return OK;
 		}
 	}
+	cJSON_Delete(dealer_ids);
 	return ERR_NO_TABLES_FOUND;
 }
 

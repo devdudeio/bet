@@ -274,8 +274,8 @@ cJSON *gui_build_final_info(int32_t *winners, int32_t winner_count, double win_a
         cJSON *board = cJSON_CreateArray();
         for (int32_t i = 0; i < 5; i++) {
             if (board_cards[i] >= 0) {
-                char card[4];
-                strncpy(card, card_value_to_string(board_cards[i]), sizeof(card));
+                char card[8] = {0};
+                strncpy(card, card_value_to_string(board_cards[i]), sizeof(card) - 1);
                 cJSON_AddItemToArray(board, cJSON_CreateString(card));
             }
         }

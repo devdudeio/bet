@@ -50,6 +50,7 @@ int32_t bet_initiate_statemachine(cJSON *argjson, struct privatebet_info *bet, s
 
 // Nanomsg removed - no longer used
 	bet_push_dcv_to_gui(dealerInfo);
+	cJSON_Delete(dealerInfo);
 
 	return retval;
 }
@@ -379,6 +380,7 @@ int32_t bet_dcv_big_blind(cJSON *argjson, struct privatebet_info *bet, struct pr
 	cJSON_AddNumberToObject(big_blind_info, "pot", vars->pot);
 
 // Nanomsg removed - no longer used
+	cJSON_Delete(big_blind_info);
 	return retval;
 }
 
@@ -415,6 +417,7 @@ int32_t bet_dcv_small_blind(cJSON *argjson, struct privatebet_info *bet, struct 
 	cJSON_AddNumberToObject(smallBlindInfo, "round", vars->round);
 	cJSON_AddNumberToObject(smallBlindInfo, "pot", vars->pot);
 // Nanomsg removed - no longer used
+	cJSON_Delete(smallBlindInfo);
 	return retval;
 }
 /***************************************************************

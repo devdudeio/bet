@@ -49,6 +49,8 @@ void bet_dcv_publish_player_active_info(struct privatebet_info *bet)
 		DLG_JSON(info, "Players disconnect info::%s", players_status_info);
 	}
 	cJSON_AddItemToObject(active_info, "player_status", players_status_info);
+	if (argjson) cJSON_Delete(argjson);
+	cJSON_Delete(active_info);
 }
 
 void bet_dcv_heartbeat_loop(void *_ptr)

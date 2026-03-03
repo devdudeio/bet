@@ -385,10 +385,14 @@ int32_t dealer_initiate_settlement(struct table *t, struct privatebet_vars *vars
 	}
 	cJSON_AddItemToObject(settlement_info, "settle_amounts", amounts_arr);
 	
-	// Player IDs (Verus IDs for payouts)
+	// Player IDs (fully qualified Verus IDs for payouts)
 	player_ids_arr = cJSON_CreateArray();
 	for (int32_t i = 0; i < num_of_players; i++) {
-		cJSON_AddItemToArray(player_ids_arr, cJSON_CreateString(player_ids[i]));
+		char full_player_id[256] = {0};
+		// Construct fully qualified ID from short name (e.g. "p1" -> "p1.parent@")
+		snprintf(full_player_id, sizeof(full_player_id), "%s.%s",
+			player_ids[i], bet_get_poker_id_fqn());
+		cJSON_AddItemToArray(player_ids_arr, cJSON_CreateString(full_player_id));
 	}
 	cJSON_AddItemToObject(settlement_info, "player_ids", player_ids_arr);
 	

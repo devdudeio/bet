@@ -364,6 +364,7 @@ void process_dealer_registration_block(char *blockhash)
 	blockcount = jint(blockjson, "height");
 	if (blockcount <= 0) {
 		dlg_error("Invalid block height, check if the underlying blockchain is syncing right");
+		cJSON_Delete(blockjson);
 		return;
 	}
 	dlg_info("Processing block height = %d for dealer registrations", blockcount);
@@ -388,6 +389,8 @@ void process_dealer_registration_block(char *blockhash)
 			char *type = jstr(tx_data, "type");
 			if (!type) {
 				dlg_info("Skipping transaction with no type");
+				cJSON_Delete(tx_data);
+				tx_data = NULL;
 				continue;
 			}
 
@@ -401,7 +404,8 @@ void process_dealer_registration_block(char *blockhash)
 
 				// Check if amount matches registration fee
 				double amount = jdouble(tx_data, "amount");
-				if (amount != DEALER_REGISTRATION_FEE) {
+				double fee_diff = amount - DEALER_REGISTRATION_FEE;
+			if (fee_diff > 0.00001 || fee_diff < -0.00001) {
 					dlg_error("Invalid registration fee amount: %f (expected: %f)", amount,
 						  DEALER_REGISTRATION_FEE);
 
@@ -456,7 +460,10 @@ void process_dealer_registration_block(char *blockhash)
 				}
 			}
 		}
+		if (tx_data) { cJSON_Delete(tx_data); tx_data = NULL; }
 	}
 
+	if (utxos) cJSON_Delete(utxos);
+	cJSON_Delete(blockjson);
 	dlg_info("Finished processing dealer registrations for block %d", blockcount);
 }

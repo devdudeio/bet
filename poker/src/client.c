@@ -256,6 +256,7 @@ int32_t bet_bvv_init(cJSON *argjson, struct privatebet_info *bet, struct private
 	}
 	// Nanomsg removed - no longer used
 	retval = OK;
+	cJSON_Delete(bvv_init_info);
 	return retval;
 }
 
@@ -269,6 +270,7 @@ static int32_t bet_bvv_join_init(struct privatebet_info *bet)
 	DLG_JSON(info, "BVV Response Info::%s\n", bvv_response_info);
 	// Nanomsg removed - no longer used
 	retval = OK;
+	cJSON_Delete(bvv_response_info);
 
 	return retval;
 }
@@ -284,6 +286,7 @@ int32_t bet_check_bvv_ready(cJSON *argjson, struct privatebet_info *bet, struct 
 	DLG_JSON(info, "BVV ready info::%s\n", bvv_ready);
 	// Nanomsg removed - no longer used
 	retval = OK;
+	cJSON_Delete(bvv_ready);
 	return retval;
 }
 
@@ -513,7 +516,7 @@ void display_cards()
 
 int32_t bet_client_receive_share(cJSON *argjson, struct privatebet_info *bet, struct privatebet_vars *vars)
 {
-	int32_t retval = OK, cardid, playerid, errs = 0, unpermi, card_type;
+	int32_t retval = OK, cardid, playerid, errs = 0, unpermi = -1, card_type;
 	cJSON *player_card_info = NULL;
 	bits256 share, decoded256;
 
