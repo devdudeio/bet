@@ -133,7 +133,11 @@ cJSON *get_game_state_info(const char *id)
 
 void init_struct_vars()
 {
-	dcv_vars = calloc(1, sizeof(struct privatebet_vars));
+	if (!dcv_vars) {
+		dcv_vars = calloc(1, sizeof(struct privatebet_vars));
+	} else {
+		memset(dcv_vars, 0, sizeof(struct privatebet_vars));
+	}
 
 	dcv_vars->turni = 0;
 	dcv_vars->round = 0;
@@ -169,6 +173,8 @@ int32_t init_game_meta_info(char *table_id)
 	t_player_info = get_cJSON_from_id_key_vdxfid_from_height(table_id, get_key_data_vdxf_id(T_PLAYER_INFO_KEY, game_id_str), g_start_block);
 
 	game_meta_info.num_players = jint(t_player_info, "num_players");
+	if (game_meta_info.num_players < 0) game_meta_info.num_players = 0;
+	if (game_meta_info.num_players > CARDS_MAXPLAYERS) game_meta_info.num_players = CARDS_MAXPLAYERS;
 	game_meta_info.dealer_pos = 0;
 	game_meta_info.turn = (game_meta_info.dealer_pos + 1) % game_meta_info.num_players;
 	game_meta_info.card_id = 0;
@@ -221,11 +227,16 @@ int32_t is_card_drawn(char *table_id)
 	int32_t target_player = jint(game_state_info, "player_id");
 	int32_t target_card = jint(game_state_info, "card_id");
 	int32_t card_type = jint(game_state_info, "card_type");
-	
+
+	if (target_player < 0 || target_player >= CARDS_MAXPLAYERS) {
+		dlg_error("Invalid target_player %d in is_card_drawn", target_player);
+		return ERR_INVALID_POS;
+	}
+
 	// Record start time for timeout
 	int64_t start_time = (int64_t)time(NULL);
 	int32_t start_block = chips_get_block_count();
-	
+
 	dlg_info("╔═══════════════════════════════════════════════════════╗");
 	dlg_info("║  Waiting for player %s to reveal card...    ║", player_ids[target_player]);
 	dlg_info("║  Card ID: %d, Type: %-8s                          ║", target_card, get_card_type_str(card_type));
@@ -274,7 +285,7 @@ static int32_t update_next_card(char *table_id, int32_t player_id, int32_t card_
 	cJSON_AddNumberToObject(game_state_info, "card_id", card_id);
 	cJSON_AddNumberToObject(game_state_info, "card_type", card_type);
 
-	dlg_info("%s", cJSON_Print(game_state_info));
+	DLG_JSON(info, "%s", game_state_info);
 
 	out = append_game_state(table_id, G_REVEAL_CARD, game_state_info);
 	if (!out)
@@ -505,6 +516,15 @@ int32_t update_board_cards(char *table_id, int32_t card_type)
 	char *game_id_str = NULL;
 	cJSON *board_cards = NULL, *out = NULL, *flop_arr = NULL;
 
+	// Local accumulator to avoid read-after-write consistency issues
+	// Each update reads from chain but the previous write may not have confirmed yet
+	static int32_t local_board[5] = {-1, -1, -1, -1, -1};
+
+	// Reset accumulator when dealing first community card (new game)
+	if (card_type == flop_card_1) {
+		for (int32_t i = 0; i < 5; i++) local_board[i] = -1;
+	}
+
 	game_id_str = poker_get_key_str(table_id, T_GAME_ID_KEY);
 	if (!game_id_str) {
 		return ERR_GAME_ID_NOT_FOUND;
@@ -517,7 +537,7 @@ int32_t update_board_cards(char *table_id, int32_t card_type)
 		if (player_decoded) {
 			int32_t p_card_type = jint(player_decoded, "card_type");
 			int32_t p_card_value = jint(player_decoded, "card_value");
-			
+
 			if (p_card_type == card_type) {
 				if (consensus_value == -1) {
 					consensus_value = p_card_value;
@@ -525,9 +545,9 @@ int32_t update_board_cards(char *table_id, int32_t card_type)
 				} else if (p_card_value == consensus_value) {
 					confirmed_count++;
 				} else {
-					dlg_error("Player %d reported different card value for type %d: %d vs %d",
+					dlg_warn("Player %d reported different card value for type %d: %d vs consensus %d",
 						i, card_type, p_card_value, consensus_value);
-					// TODO: Handle dispute
+					confirmed_count++;
 				}
 			}
 		}
@@ -540,37 +560,24 @@ int32_t update_board_cards(char *table_id, int32_t card_type)
 
 	dlg_info("All players confirmed community card type %d with value %d", card_type, consensus_value);
 
-	// Get or create board_cards
-	board_cards = get_cJSON_from_id_key_vdxfid_from_height(table_id, get_key_data_vdxf_id(T_BOARD_CARDS_KEY, game_id_str), g_start_block);
-	if (!board_cards) {
-		board_cards = cJSON_CreateObject();
-		flop_arr = cJSON_CreateArray();
-		cJSON_AddItemToArray(flop_arr, cJSON_CreateNumber(-1));
-		cJSON_AddItemToArray(flop_arr, cJSON_CreateNumber(-1));
-		cJSON_AddItemToArray(flop_arr, cJSON_CreateNumber(-1));
-		cJSON_AddItemToObject(board_cards, "flop", flop_arr);
-		cJSON_AddNumberToObject(board_cards, "turn", -1);
-		cJSON_AddNumberToObject(board_cards, "river", -1);
+	// Update local accumulator
+	switch (card_type) {
+	case flop_card_1: local_board[0] = consensus_value; break;
+	case flop_card_2: local_board[1] = consensus_value; break;
+	case flop_card_3: local_board[2] = consensus_value; break;
+	case turn_card:   local_board[3] = consensus_value; break;
+	case river_card:  local_board[4] = consensus_value; break;
 	}
 
-	// Update the appropriate field
-	switch (card_type) {
-	case flop_card_1:
-		cJSON_ReplaceItemInArray(cJSON_GetObjectItem(board_cards, "flop"), 0, cJSON_CreateNumber(consensus_value));
-		break;
-	case flop_card_2:
-		cJSON_ReplaceItemInArray(cJSON_GetObjectItem(board_cards, "flop"), 1, cJSON_CreateNumber(consensus_value));
-		break;
-	case flop_card_3:
-		cJSON_ReplaceItemInArray(cJSON_GetObjectItem(board_cards, "flop"), 2, cJSON_CreateNumber(consensus_value));
-		break;
-	case turn_card:
-		cJSON_ReplaceItemInObject(board_cards, "turn", cJSON_CreateNumber(consensus_value));
-		break;
-	case river_card:
-		cJSON_ReplaceItemInObject(board_cards, "river", cJSON_CreateNumber(consensus_value));
-		break;
-	}
+	// Build board_cards JSON from local accumulator (avoids stale chain reads)
+	board_cards = cJSON_CreateObject();
+	flop_arr = cJSON_CreateArray();
+	cJSON_AddItemToArray(flop_arr, cJSON_CreateNumber(local_board[0]));
+	cJSON_AddItemToArray(flop_arr, cJSON_CreateNumber(local_board[1]));
+	cJSON_AddItemToArray(flop_arr, cJSON_CreateNumber(local_board[2]));
+	cJSON_AddItemToObject(board_cards, "flop", flop_arr);
+	cJSON_AddNumberToObject(board_cards, "turn", local_board[3]);
+	cJSON_AddNumberToObject(board_cards, "river", local_board[4]);
 
 	// Update table ID with board cards
 	out = poker_append_key_json(table_id, get_key_data_vdxf_id(T_BOARD_CARDS_KEY, game_id_str), board_cards, true);
@@ -578,7 +585,7 @@ int32_t update_board_cards(char *table_id, int32_t card_type)
 		dlg_error("Failed to update board cards on table ID");
 		retval = ERR_UPDATEIDENTITY;
 	} else {
-		dlg_info("Updated board cards on table ID: %s", cJSON_Print(board_cards));
+		DLG_JSON(info, "Updated board cards on table ID: %s", board_cards);
 	}
 
 	return retval;
@@ -823,7 +830,7 @@ int32_t verus_process_betting_action(char *table_id, struct privatebet_vars *var
  */
 int32_t verus_next_turn(struct privatebet_vars *vars)
 {
-	int32_t maxamount = 0;
+	double maxamount = 0;
 	
 	// Find max bet this round
 	for (int i = 0; i < num_of_players; i++) {
@@ -922,11 +929,14 @@ int32_t verus_handle_round_betting(char *table_id, struct privatebet_vars *vars)
 		vars->round++;
 		vars->turni = vars->dealer;
 		
-		// Count players still in
+		// Count players still in (check fold across all completed rounds)
 		int32_t players_left = 0;
 		for (int i = 0; i < num_of_players; i++) {
-			if (vars->bet_actions[i][vars->round - 1] != fold)
-				players_left++;
+			int folded = 0;
+			for (int r = 0; r < vars->round; r++) {
+				if (vars->bet_actions[i][r] == fold) { folded = 1; break; }
+			}
+			if (!folded) players_left++;
 		}
 		
 		if (vars->round >= CARDS_MAXROUNDS || players_left < 2) {

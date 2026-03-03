@@ -113,7 +113,7 @@ ${TARGET_DIR}/libnng.a: external/nng/include/nng/nng.h
 
 ${TARGET_DIR}/libwebsockets.a: external/libwebsockets/include/libwebsockets.h
 	mkdir -p $(TARGET_DIR)/libwebsockets-build
-	cd $(TARGET_DIR)/libwebsockets-build && PATH=$(shell pwd)/external/cmake/bin:${PATH} cmake -DLWS_WITH_HTTP2=1 -DLWS_WITH_NO_LOGS=ON $(TOP)/libwebsockets \
+	cd $(TARGET_DIR)/libwebsockets-build && PATH=$(shell pwd)/external/cmake/bin:${PATH} cmake -DLWS_WITH_HTTP2=1 -DLWS_WITH_NO_LOGS=ON -DDISABLE_WERROR=ON $(TOP)/libwebsockets \
 	&& $(MAKE) -j4 && cp -av lib/libwebsockets.a ..
 
 distclean: external-distclean

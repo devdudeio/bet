@@ -43,6 +43,7 @@
 struct lws *wsi_global_client = NULL, *wsi_global_client_write = NULL;
 
 int ws_connection_status = 0, ws_connection_status_write = 0;
+static pthread_mutex_t wsi_client_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct lws *wsi_global_bvv = NULL;
 
@@ -56,6 +57,55 @@ int32_t sharesflag[CARDS_MAXCARDS][CARDS_MAXPLAYERS];
 
 int32_t data_exists = 0;
 char player_gui_data[8196];
+
+// Message queue for non-blocking GUI writes
+typedef struct gui_msg_node {
+	char *data;
+	size_t len;
+	struct gui_msg_node *next;
+} gui_msg_node_t;
+
+static gui_msg_node_t *gui_msg_head = NULL;
+static gui_msg_node_t *gui_msg_tail = NULL;
+static pthread_mutex_t gui_msg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void gui_msg_enqueue(const char *json_str, size_t len)
+{
+	gui_msg_node_t *node = malloc(sizeof(gui_msg_node_t));
+	if (!node) return;
+	// Allocate with LWS_PRE padding before data (required by lws_write)
+	node->data = malloc(LWS_PRE + len + 1);
+	if (!node->data) { free(node); return; }
+	memcpy(node->data + LWS_PRE, json_str, len);
+	node->data[LWS_PRE + len] = '\0';
+	node->len = len;
+	node->next = NULL;
+
+	pthread_mutex_lock(&gui_msg_mutex);
+	if (gui_msg_tail) {
+		gui_msg_tail->next = node;
+	} else {
+		gui_msg_head = node;
+	}
+	gui_msg_tail = node;
+	pthread_mutex_unlock(&gui_msg_mutex);
+}
+
+// Returns a node that the caller must free (node->data and node).
+// The actual data starts at node->data + LWS_PRE.
+static gui_msg_node_t *gui_msg_dequeue(void)
+{
+	gui_msg_node_t *node = NULL;
+	pthread_mutex_lock(&gui_msg_mutex);
+	if (gui_msg_head) {
+		node = gui_msg_head;
+		gui_msg_head = node->next;
+		if (!gui_msg_head)
+			gui_msg_tail = NULL;
+	}
+	pthread_mutex_unlock(&gui_msg_mutex);
+	return node;
+}
 
 char player_payin_txid[100];
 struct deck_player_info player_info;
@@ -97,30 +147,9 @@ int32_t reset_lock = 0;
 struct lws_context_creation_info lws_player_info, lws_player_info_read, lws_player_info_write;
 struct lws_context *player_context = NULL, *player_context_read = NULL, *player_context_write = NULL;
 
-void write_to_GUI(void *ptr)
-{
-	cJSON *data = ptr;
-
-	char *json_str = cJSON_Print(data);
-	dlg_info("%s\n", json_str);
-	if (ws_connection_status == 1) {
-		memset(player_gui_data, 0, sizeof(player_gui_data));
-		size_t len = strlen(json_str);
-		if (len >= sizeof(player_gui_data)) {
-			len = sizeof(player_gui_data) - 1;
-		}
-		memcpy(player_gui_data, json_str, len);
-		player_gui_data[len] = '\0';  // Ensure null termination
-		data_exists = 1;
-		lws_callback_on_writable(wsi_global_client);
-	}
-	free(json_str);
-}
-
 void player_lws_write(cJSON *data)
 {
 	// Check if this is a "safe" message that can be sent before backend is fully ready
-	// These are wallet/status queries that don't require game state
 	bool is_safe_message = false;
 	const char *method = jstr(data, "method");
 	if (method != NULL) {
@@ -130,28 +159,19 @@ void player_lws_write(cJSON *data)
 			is_safe_message = true;
 		}
 	}
-	
+
 	if (backend_status == backend_ready || is_safe_message) {
-		if (ws_connection_status == 1) {
-			// Wait for previous write to complete (same pattern as dealer)
-		if (data_exists == 1) {
-			dlg_info("Waiting for previous write to complete...");
-			while (data_exists == 1) {
-				sleep(1);
-			}
-		}
-		memset(player_gui_data, 0, sizeof(player_gui_data));
-		char *json_str = cJSON_Print(data);
-		dlg_info("\033[34m[► TO GUI]\033[0m %s", json_str);
-		size_t len = strlen(json_str);
-		if (len >= sizeof(player_gui_data)) {
-			len = sizeof(player_gui_data) - 1;
-		}
-		memcpy(player_gui_data, json_str, len);
-		player_gui_data[len] = '\0';  // Ensure null termination
-		free(json_str);
-		data_exists = 1;
-		lws_callback_on_writable(wsi_global_client);
+		pthread_mutex_lock(&wsi_client_mutex);
+		int connected = (ws_connection_status == 1 && wsi_global_client != NULL);
+		struct lws *wsi_snap = wsi_global_client;
+		pthread_mutex_unlock(&wsi_client_mutex);
+		if (connected) {
+			char *json_str = cJSON_Print(data);
+			dlg_info("\033[34m[► TO GUI]\033[0m %s", json_str);
+			size_t len = strlen(json_str);
+			gui_msg_enqueue(json_str, len);
+			free(json_str);
+			lws_callback_on_writable(wsi_snap);
 		} else {
 			dlg_warn("Backend is ready, but GUI is not started yet...");
 		}
@@ -201,6 +221,7 @@ int32_t bet_bvv_init(cJSON *argjson, struct privatebet_info *bet, struct private
 			dcv_blind_cards[i][j] = jbits256i(cjson_dcv_blind_cards, i * bet->range + j);
 		}
 	}
+	if (g_shares) { free(g_shares); g_shares = NULL; }
 	g_shares = (struct enc_share *)malloc(CARDS_MAXPLAYERS * CARDS_MAXPLAYERS * CARDS_MAXCARDS *
 					      sizeof(struct enc_share));
 	if (g_shares == NULL) {
@@ -245,7 +266,7 @@ static int32_t bet_bvv_join_init(struct privatebet_info *bet)
 
 	bvv_response_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(bvv_response_info, "method", "bvv_join");
-	dlg_info("BVV Response Info::%s\n", cJSON_Print(bvv_response_info));
+	DLG_JSON(info, "BVV Response Info::%s\n", bvv_response_info);
 	// Nanomsg removed - no longer used
 	retval = OK;
 
@@ -260,7 +281,7 @@ int32_t bet_check_bvv_ready(cJSON *argjson, struct privatebet_info *bet, struct 
 	bvv_ready = cJSON_CreateObject();
 	cJSON_AddStringToObject(bvv_ready, "method", "bvv_ready");
 
-	dlg_info("BVV ready info::%s\n", cJSON_Print(bvv_ready));
+	DLG_JSON(info, "BVV ready info::%s\n", bvv_ready);
 	// Nanomsg removed - no longer used
 	retval = OK;
 	return retval;
@@ -380,9 +401,11 @@ bits256 bet_decode_card(cJSON *argjson, struct privatebet_info *bet, struct priv
 							if (bits256_cmp(decoded,
 									player_info.cardprods[bet->myplayerid][k]) ==
 							    0) {
-								player_cards[no_of_player_cards] =
-									atoi(bits256_str(str, decoded));
-								no_of_player_cards++;
+								if (no_of_player_cards < CARDS_MAXCARDS) {
+									player_cards[no_of_player_cards] =
+										atoi(bits256_str(str, decoded));
+									no_of_player_cards++;
+								}
 								tmp = player_info.cardprivkeys[m];
 								flag = 1;
 								goto end;
@@ -441,7 +464,9 @@ static int32_t bet_player_winner(cJSON *argjson, struct privatebet_info *bet, st
 		cJSON_AddStringToObject(invoice_info, "method", "claim");
 		cJSON_AddNumberToObject(invoice_info, "playerid", bet->myplayerid);
 		cJSON_AddStringToObject(invoice_info, "label", params);
-		cJSON_AddStringToObject(invoice_info, "invoice", cJSON_Print(winner_invoice_info));
+		{ char *_j = cJSON_Print(winner_invoice_info);
+		  cJSON_AddStringToObject(invoice_info, "invoice", _j ? _j : "null");
+		  free(_j); }
 
 		// Nanomsg removed - no longer used
 		retval = OK;
@@ -467,14 +492,18 @@ void display_cards()
 
 	hole_card_info = cJSON_CreateArray();
 	for (int32_t i = 0; ((i < no_of_hole_cards) && (i < number_cards_drawn)); i++) {
-		cJSON_AddItemToArray(hole_card_info, cJSON_CreateString(cards[player_card_values[i]]));
+		int32_t cv = player_card_values[i];
+		if (cv >= 0 && cv < 52)
+			cJSON_AddItemToArray(hole_card_info, cJSON_CreateString(cards[cv]));
 	}
 
 	cJSON_AddItemToObject(init_card_info, "holecards", hole_card_info);
 
 	board_card_info = cJSON_CreateArray();
 	for (int32_t i = no_of_hole_cards; ((i < hand_size) && (i < number_cards_drawn)); i++) {
-		cJSON_AddItemToArray(board_card_info, cJSON_CreateString(cards[player_card_values[i]]));
+		int32_t cv = player_card_values[i];
+		if (cv >= 0 && cv < 52)
+			cJSON_AddItemToArray(board_card_info, cJSON_CreateString(cards[cv]));
 	}
 
 	cJSON_AddItemToObject(init_card_info, "board", board_card_info);
@@ -524,6 +553,10 @@ int32_t bet_client_receive_share(cJSON *argjson, struct privatebet_info *bet, st
 			}
 		}
 		if (unpermi != -1) {
+			if (number_cards_drawn >= hand_size) {
+				dlg_error("number_cards_drawn exceeds hand_size");
+				return ERR_CARD_RETRIEVING_USING_SS;
+			}
 			player_card_values[number_cards_drawn++] = decoded256.bytes[30];
 			player_card_info = cJSON_CreateObject();
 			cJSON_AddStringToObject(player_card_info, "method", "playerCardInfo");
@@ -531,7 +564,7 @@ int32_t bet_client_receive_share(cJSON *argjson, struct privatebet_info *bet, st
 			cJSON_AddNumberToObject(player_card_info, "cardid", cardid);
 			cJSON_AddNumberToObject(player_card_info, "card_type", card_type);
 			cJSON_AddNumberToObject(player_card_info, "decoded_card", decoded256.bytes[30]);
-			dlg_info("%s", cJSON_Print(player_card_info));
+			DLG_JSON(info, "%s", player_card_info);
 			// Nanomsg removed - no longer used
 			retval = OK;
 		}
@@ -629,7 +662,7 @@ int32_t bet_client_turn(cJSON *argjson, struct privatebet_info *bet, struct priv
 	int32_t retval = OK, playerid;
 
 	playerid = jint(argjson, "playerid");
-	dlg_info("playerid::%d::%s::\n", playerid, cJSON_Print(argjson));
+	{ char *_j = cJSON_Print(argjson); dlg_info("playerid::%d::%s::\n", playerid, _j ? _j : "null"); free(_j); }
 
 	if (playerid == bet->myplayerid) {
 		no_of_shares = 1;
@@ -669,6 +702,7 @@ int32_t bet_client_bvv_init(cJSON *argjson, struct privatebet_info *bet, struct 
 	bits256 temp, player_privs[CARDS_MAXCARDS];
 
 	player_info.bvvpubkey = jbits256(argjson, "bvvpubkey");
+	if (g_shares) { free(g_shares); g_shares = NULL; }
 	g_shares = (struct enc_share *)malloc(CARDS_MAXPLAYERS * CARDS_MAXPLAYERS * CARDS_MAXCARDS *
 					      sizeof(struct enc_share));
 	if (g_shares == NULL) {
@@ -762,7 +796,7 @@ int32_t bet_client_join_res(cJSON *argjson, struct privatebet_info *bet, struct 
 	if (0 == bits256_cmp(player_info.player_key.prod, jbits256(argjson, "pubkey"))) {
 		bet_player->myplayerid = jint(argjson, "playerid");
 		bet->myplayerid = jint(argjson, "playerid");
-		dlg_info("%s", cJSON_Print(argjson));
+		DLG_JSON(info, "%s", argjson);
 
 		// Lightning Network support removed - channel establishment no longer used
 
@@ -780,7 +814,7 @@ int32_t bet_client_join_res(cJSON *argjson, struct privatebet_info *bet, struct 
 		cJSON_AddStringToObject(init_info, "method", "deal");
 		cJSON_AddItemToObject(init_info, "deal", init_card_info);
 
-		dlg_info("init_info::%s", cJSON_Print(init_info));
+		DLG_JSON(info, "init_info::%s", init_info);
 		player_lws_write(init_info);
 	}
 	return retval;
@@ -809,7 +843,7 @@ int32_t bet_client_join(cJSON *argjson, struct privatebet_info *bet)
 	cJSON_AddStringToObject(joininfo, "req_identifier", req_identifier);
 	cJSON_AddStringToObject(joininfo, "player_name", player_name);
 
-	dlg_info("join info::%s\n", cJSON_Print(joininfo));
+	DLG_JSON(info, "join info::%s\n", joininfo);
 	// Nanomsg removed - no longer used
 	retval = OK;
 
@@ -831,7 +865,7 @@ static int32_t bet_player_process_player_join(cJSON *argjson)
 			warning_info = cJSON_CreateObject();
 			cJSON_AddStringToObject(warning_info, "method", "warning");
 			cJSON_AddNumberToObject(warning_info, "warning_num", backend_not_ready);
-			dlg_warn("%s\n", cJSON_Print(warning_info));
+			DLG_JSON(warn, "%s\n", warning_info);
 			player_lws_write(warning_info);
 		}
 	}
@@ -882,7 +916,9 @@ void bet_player_table_info(void)
 			if (player_info_array && player_info_array->type == cJSON_Array) {
 				int array_size = cJSON_GetArraySize(player_info_array);
 				for (int i = 0; i < array_size; i++) {
-					char *player_entry = cJSON_GetArrayItem(player_info_array, i)->valuestring;
+					cJSON *entry_item = cJSON_GetArrayItem(player_info_array, i);
+					if (!entry_item || !entry_item->valuestring) continue;
+					char *player_entry = entry_item->valuestring;
 					// Format: "verus_pid_txid_slot"
 					// Extract slot number (last part after last underscore)
 					char *last_underscore = strrchr(player_entry, '_');
@@ -919,8 +955,28 @@ void bet_player_table_info(void)
 		}
 	}
 	cJSON_AddItemToObject(table_info, "occupied_seats", occupied_seats);
-	
-	dlg_info("%s\n", cJSON_Print(table_info));
+
+	// Add our own player_id so GUI can derive userSeat on reconnect
+	cJSON_AddStringToObject(table_info, "player_id", player_config.verus_pid);
+
+	// Add current game state for GUI resync after reconnect
+	extern int32_t player_init_state;
+	cJSON_AddNumberToObject(table_info, "player_state", player_init_state);
+
+	// If cards have been dealt, re-send hole cards
+	if (p_local_state.decoded_cards[0] >= 0 && p_local_state.decoded_cards[1] >= 0) {
+		extern cJSON *gui_build_deal_holecards(int32_t card1, int32_t card2, double balance);
+		cJSON *deal_data = gui_build_deal_holecards(
+			p_local_state.decoded_cards[0], p_local_state.decoded_cards[1], 0.0);
+		if (deal_data) {
+			cJSON *deal_obj = cJSON_GetObjectItem(deal_data, "deal");
+			if (deal_obj) {
+				cJSON_AddItemReferenceToObject(table_info, "deal", deal_obj);
+			}
+		}
+	}
+
+	DLG_JSON(info, "%s\n", table_info);
 	player_lws_write(table_info);
 	cJSON_Delete(table_info);
 }
@@ -972,12 +1028,56 @@ int32_t bet_player_frontend(struct lws *wsi, cJSON *argjson)
 
 	method = jstr(argjson,"method");
 	switchs(method) {
-		dlg_info("\033[32m[◄ FROM GUI]\033[0m %s", cJSON_Print(argjson));
+		DLG_JSON(info, "\033[32m[◄ FROM GUI]\033[0m %s", argjson);
 		cases("backend_status")
 			bet_player_process_be_status();
 			break;
 		cases("betting")
-			retval = bet_player_round_betting(argjson, bet_player, player_vars);
+			{
+				// Route GUI betting actions to the Verus identity system
+				// (the old bet_player_round_betting used removed nanomsg/multisig)
+				extern int32_t player_write_betting_action(char *table_id, const char *action, double amount);
+				extern char g_gui_betting_action[32];
+				extern double g_gui_betting_min_amount;
+
+				const char *action_name = NULL;
+				double amount = 0.0;
+
+				// For blinds, always send "bet" regardless of what the GUI chose
+				if (strcmp(g_gui_betting_action, "small_blind") == 0 ||
+				    strcmp(g_gui_betting_action, "big_blind") == 0) {
+					action_name = "bet";
+					amount = g_gui_betting_min_amount;
+				} else {
+					// Regular betting round - use the GUI's choice
+					cJSON *poss = cJSON_GetObjectItem(argjson, "possibilities");
+					int action_id = 0;
+					if (poss) {
+						cJSON *first = cJSON_GetArrayItem(poss, 0);
+						if (first) action_id = first->valueint;
+					}
+					switch (action_id) {
+						case 3: action_name = "check"; amount = 0.0; break;
+						case 4: action_name = "raise"; amount = jdouble(argjson, "bet_amount"); break;
+						case 5: action_name = "call";  amount = jdouble(argjson, "toCall"); break;
+						case 6: action_name = "allin"; amount = jdouble(argjson, "toCall"); break;
+						case 7: action_name = "fold";  amount = 0.0; break;
+						default:
+							dlg_warn("Unknown GUI betting action: %d", action_id);
+							break;
+					}
+				}
+				if (action_name) {
+					dlg_info("GUI betting action: %s (amount=%.4f CHIPS) [state=%s]",
+						action_name, amount, g_gui_betting_action);
+					retval = player_write_betting_action(player_config.table_id, action_name, amount);
+					if (retval != OK) {
+						dlg_error("Failed to write betting action to chain");
+					}
+					// Clear context after processing to prevent duplicate writes
+					g_gui_betting_action[0] = '\0';
+				}
+			}
 			break;
 		cases("get_bal_info")
 			{
@@ -1093,15 +1193,27 @@ int32_t lws_callback_http_player_write(struct lws *wsi, enum lws_callback_reason
 
 	switch (reason) {
 	case LWS_CALLBACK_RECEIVE:
+		if (lws_buf_length_1 + len >= sizeof(lws_buf_1)) {
+			dlg_error("WebSocket buffer overflow prevented (write callback)");
+			lws_buf_length_1 = 0;
+			return -1;
+		}
 		memcpy(lws_buf_1 + lws_buf_length_1, in, len);
 		lws_buf_length_1 += len;
 		if (!lws_is_final_fragment(wsi))
 			break;
 		argjson = cJSON_Parse(lws_buf_1);
+		if (!argjson) {
+			dlg_error("Invalid JSON in write callback");
+			memset(lws_buf_1, 0x00, sizeof(lws_buf_1));
+			lws_buf_length_1 = 0;
+			break;
+		}
 
 		if ((retval = bet_player_frontend(wsi, argjson)) != OK) {
 			dlg_error("%s", bet_err_str(retval));
 		}
+		cJSON_Delete(argjson);
 		memset(lws_buf_1, 0x00, sizeof(lws_buf_1));
 		lws_buf_length_1 = 0;
 
@@ -1112,10 +1224,18 @@ int32_t lws_callback_http_player_write(struct lws *wsi, enum lws_callback_reason
 		bet_gui_init_message(bet_player);
 		break;
 	case LWS_CALLBACK_SERVER_WRITEABLE:
-		if (data_exists) {
-			if (strlen(player_gui_data) != 0) {
-				lws_write(wsi, (unsigned char *)player_gui_data, strlen(player_gui_data), 0);
-				data_exists = 0;
+		{
+			gui_msg_node_t *node = gui_msg_dequeue();
+			if (node) {
+				lws_write(wsi, (unsigned char *)node->data + LWS_PRE, node->len, LWS_WRITE_TEXT);
+				free(node->data);
+				free(node);
+				// If more messages queued, request another writable callback
+				pthread_mutex_lock(&gui_msg_mutex);
+				int has_more = (gui_msg_head != NULL);
+				pthread_mutex_unlock(&gui_msg_mutex);
+				if (has_more)
+					lws_callback_on_writable(wsi);
 			}
 		}
 		break;
@@ -1133,28 +1253,49 @@ int32_t lws_callback_http_player_read(struct lws *wsi, enum lws_callback_reasons
 
 	switch (reason) {
 	case LWS_CALLBACK_RECEIVE:
+		if (lws_buf_length_1 + len >= sizeof(lws_buf_1)) {
+			dlg_error("WebSocket buffer overflow prevented (read callback)");
+			lws_buf_length_1 = 0;
+			return -1;
+		}
 		memcpy(lws_buf_1 + lws_buf_length_1, in, len);
 		lws_buf_length_1 += len;
 		if (!lws_is_final_fragment(wsi))
 			break;
 
 		argjson = cJSON_Parse(unstringify(lws_buf_1));
+		if (!argjson) {
+			dlg_error("Invalid JSON in read callback");
+			memset(lws_buf_1, 0x00, sizeof(lws_buf_1));
+			lws_buf_length_1 = 0;
+			break;
+		}
 		if ((retval = bet_player_frontend(wsi, argjson)) != OK) {
 			dlg_error("%s", bet_err_str(retval));
 		}
+		cJSON_Delete(argjson);
 		memset(lws_buf_1, 0x00, sizeof(lws_buf_1));
 		lws_buf_length_1 = 0;
 
 		break;
 	case LWS_CALLBACK_ESTABLISHED:
+		pthread_mutex_lock(&wsi_client_mutex);
 		wsi_global_client = wsi;
 		ws_connection_status = 1;
+		pthread_mutex_unlock(&wsi_client_mutex);
 		break;
 	case LWS_CALLBACK_SERVER_WRITEABLE:
-		if (data_exists) {
-			if (strlen(player_gui_data) != 0) {
-				lws_write(wsi, (unsigned char *)player_gui_data, strlen(player_gui_data), 0);
-				data_exists = 0;
+		{
+			gui_msg_node_t *node = gui_msg_dequeue();
+			if (node) {
+				lws_write(wsi, (unsigned char *)node->data + LWS_PRE, node->len, LWS_WRITE_TEXT);
+				free(node->data);
+				free(node);
+				pthread_mutex_lock(&gui_msg_mutex);
+				int has_more = (gui_msg_head != NULL);
+				pthread_mutex_unlock(&gui_msg_mutex);
+				if (has_more)
+					lws_callback_on_writable(wsi);
 			}
 		}
 		break;
@@ -1169,34 +1310,62 @@ int32_t lws_callback_http_player(struct lws *wsi, enum lws_callback_reasons reas
 	int32_t retval = OK;
 	cJSON *argjson = NULL;
 
-	//dlg_info("callback code::%d\n", (int)reason);
 	switch (reason) {
 	case LWS_CALLBACK_RECEIVE:
+		if (lws_buf_length_1 + len >= sizeof(lws_buf_1)) {
+			dlg_error("WebSocket buffer overflow prevented (main callback)");
+			lws_buf_length_1 = 0;
+			return -1;
+		}
 		memcpy(lws_buf_1 + lws_buf_length_1, in, len);
 		lws_buf_length_1 += len;
 		if (!lws_is_final_fragment(wsi))
 			break;
 		argjson = cJSON_Parse(lws_buf_1);
+		if (!argjson) {
+			dlg_error("Invalid JSON in main callback");
+			memset(lws_buf_1, 0x00, sizeof(lws_buf_1));
+			lws_buf_length_1 = 0;
+			break;
+		}
 
 		if ((retval = bet_player_frontend(wsi, argjson)) != OK) {
 			dlg_error("%s", bet_err_str(retval));
 		}
+		cJSON_Delete(argjson);
 		memset(lws_buf_1, 0x00, sizeof(lws_buf_1));
 		lws_buf_length_1 = 0;
 
 		break;
 	case LWS_CALLBACK_ESTABLISHED:
+		pthread_mutex_lock(&wsi_client_mutex);
 		wsi_global_client = wsi;
-		dlg_info("LWS_CALLBACK_ESTABLISHED\n");
 		ws_connection_status = 1;
+		pthread_mutex_unlock(&wsi_client_mutex);
+		dlg_info("LWS_CALLBACK_ESTABLISHED\n");
 		bet_gui_init_message(bet_player);
 		break;
+	case LWS_CALLBACK_CLOSED:
+		dlg_info("GUI disconnected");
+		pthread_mutex_lock(&wsi_client_mutex);
+		if (wsi == wsi_global_client) {
+			ws_connection_status = 0;
+			wsi_global_client = NULL;
+		}
+		pthread_mutex_unlock(&wsi_client_mutex);
+		break;
 	case LWS_CALLBACK_SERVER_WRITEABLE:
-		dlg_info("LWS_CALLBACK_SERVER_WRITEABLE triggered\n");
-		if (data_exists) {
-			if (strlen(player_gui_data) != 0) {
-				lws_write(wsi, (unsigned char *)player_gui_data, strlen(player_gui_data), 0);
-				data_exists = 0;
+		{
+			gui_msg_node_t *node = gui_msg_dequeue();
+			if (node) {
+				lws_write(wsi, (unsigned char *)node->data + LWS_PRE, node->len, LWS_WRITE_TEXT);
+				free(node->data);
+				free(node);
+				pthread_mutex_lock(&gui_msg_mutex);
+				int has_more = (gui_msg_head != NULL);
+				pthread_mutex_unlock(&gui_msg_mutex);
+				if (has_more)
+					lws_callback_on_writable(wsi);
 			}
 		}
 		break;
@@ -1399,86 +1568,60 @@ static void bet_push_join_info(cJSON *argjson)
 		cJSON_AddNumberToObject(join_info, "seat_taken", 1);
 	else
 		cJSON_AddNumberToObject(join_info, "seat_taken", 0);
-	dlg_info("Writing the availability of the seat info to the GUI \n %s", cJSON_Print(join_info));
+	DLG_JSON(info, "Writing the availability of the seat info to the GUI \n %s", join_info);
 	player_lws_write(join_info);
 }
 
 static int32_t bet_update_payin_tx_across_cashiers(cJSON *argjson, cJSON *txid)
 {
 	int32_t retval = OK;
-	char *sql_query = NULL;
 	cJSON *msig_addr_nodes = NULL, *payin_tx_insert_query = NULL;
 
-	const char *txid_str = cJSON_Print(txid);
-	const char *msig_addr_nodes_str = cJSON_Print(cJSON_GetObjectItem(argjson, "msig_addr_nodes"));
-	int required_size;
+	char *txid_str = cJSON_Print(txid);
+	char *msig_addr_nodes_str = cJSON_Print(cJSON_GetObjectItem(argjson, "msig_addr_nodes"));
 
 	if (txid_str == NULL || msig_addr_nodes_str == NULL) {
 		dlg_error("Invalid txid or msig_addr_nodes");
-		if (txid_str) free((void *)txid_str);
-		if (msig_addr_nodes_str) free((void *)msig_addr_nodes_str);
+		if (txid_str) free(txid_str);
+		if (msig_addr_nodes_str) free(msig_addr_nodes_str);
 		return ERR_ARGS_NULL;
 	}
 
-	required_size = snprintf(NULL, 0, "INSERT INTO player_tx_mapping values(%s,\'%s\',\'%s\',\'%s\',%d,%d, NULL);",
-		txid_str, table_id, req_identifier, msig_addr_nodes_str, tx_unspent, threshold_value) + 1;
+	/* Insert into player's local DB using parameterized query */
+	retval = bet_sql_insert_player_tx(txid_str, table_id, req_identifier,
+		msig_addr_nodes_str, tx_unspent, threshold_value);
+	free(txid_str);
+	free(msig_addr_nodes_str);
 
-	if (required_size > sql_query_size) {
-		sql_query = calloc(required_size, sizeof(char));
-	} else {
-		sql_query = calloc(sql_query_size, sizeof(char));
-	}
-	if (sql_query == NULL) {
-		free((void *)txid_str);
-		free((void *)msig_addr_nodes_str);
-		return ERR_MEMORY_ALLOC;
-	}
-
-	snprintf(sql_query, required_size, "INSERT INTO player_tx_mapping values(%s,\'%s\',\'%s\',\'%s\',%d,%d, NULL);",
-		txid_str, table_id, req_identifier, msig_addr_nodes_str, tx_unspent, threshold_value);
-	retval = bet_run_query(sql_query); // This is to update payin_tx in the players DB
-	free((void *)txid_str);
-	free((void *)msig_addr_nodes_str);
-
-	memset(sql_query, 0x00, sql_query_size);
-	msig_addr_nodes = cJSON_CreateArray();
 	msig_addr_nodes = cJSON_GetObjectItem(argjson, "msig_addr_nodes");
-	
-	const char *msig_addr_nodes_unstr = unstringify(cJSON_Print(cJSON_GetObjectItem(argjson, "msig_addr_nodes")));
+
+	char *_msig_raw = cJSON_Print(cJSON_GetObjectItem(argjson, "msig_addr_nodes"));
+	const char *msig_addr_nodes_unstr = _msig_raw ? unstringify(_msig_raw) : NULL;
 	txid_str = cJSON_Print(txid);
 	if (txid_str == NULL || msig_addr_nodes_unstr == NULL) {
 		dlg_error("Invalid txid or msig_addr_nodes for second query");
-		if (txid_str) free((void *)txid_str);
-		if (sql_query) free(sql_query);
+		if (txid_str) free(txid_str);
+		free(_msig_raw);
 		return ERR_ARGS_NULL;
 	}
 
-	required_size = snprintf(NULL, 0, "INSERT INTO c_tx_addr_mapping values(%s,\'%s\',%d,\'%s\',\'%s\',1,NULL);",
-		txid_str, legacy_m_of_n_msig_addr, threshold_value, table_id, msig_addr_nodes_unstr) + 1;
+	/* Insert into c_tx_addr_mapping using parameterized query */
+	bet_sql_insert_c_tx_addr(txid_str, legacy_m_of_n_msig_addr, threshold_value,
+		table_id, msig_addr_nodes_unstr, 1);
+	free(txid_str);
+	free(_msig_raw);
 
-	if (required_size > sql_query_size) {
-		char *new_sql_query = realloc(sql_query, required_size);
-		if (new_sql_query == NULL) {
-			free((void *)txid_str);
-			free(sql_query);
-			return ERR_MEMORY_ALLOC;
-		}
-		sql_query = new_sql_query;
-	}
-
-	snprintf(sql_query, required_size, "INSERT INTO c_tx_addr_mapping values(%s,\'%s\',%d,\'%s\',\'%s\',1,NULL);",
-		txid_str, legacy_m_of_n_msig_addr, threshold_value, table_id, msig_addr_nodes_unstr);
-	free((void *)txid_str);
-
+	/* Send lock_in_tx message with structured data (not raw SQL) to cashier nodes */
 	payin_tx_insert_query = cJSON_CreateObject();
 	cJSON_AddStringToObject(payin_tx_insert_query, "method", "lock_in_tx");
-	cJSON_AddStringToObject(payin_tx_insert_query, "sql_query", sql_query);
+	cJSON_AddStringToObject(payin_tx_insert_query, "table_id", table_id);
 	for (int32_t i = 0; i < cJSON_GetArraySize(msig_addr_nodes); i++) {
-		bet_msg_cashier(payin_tx_insert_query,
-				unstringify(cJSON_Print(cJSON_GetArrayItem(msig_addr_nodes, i))));
+		char *_j = cJSON_Print(cJSON_GetArrayItem(msig_addr_nodes, i));
+		if (_j) {
+			bet_msg_cashier(payin_tx_insert_query, unstringify(_j));
+			free(_j);
+		}
 	}
-	if (sql_query)
-		free(sql_query);
 
 	return retval;
 }
@@ -1577,7 +1720,7 @@ static int32_t bet_player_initialize_table_params(cJSON *argjson, struct private
 		strlen(jstr(argjson, "legacy_m_of_n_msig_addr")));
 	threshold_value = jint(argjson, "threshold_value");
 	memset(table_id, 0x00, sizeof(table_id));
-	strncpy(table_id, jstr(argjson, "table_id"), strlen(jstr(argjson, "table_id")));
+	strncpy(table_id, jstr(argjson, "table_id"), sizeof(table_id) - 1);
 
 	bet->maxplayers = max_players;
 	bet->numplayers = max_players;
@@ -1590,8 +1733,9 @@ static struct cJSON *bet_player_make_payin_tx_data(cJSON *argjson, struct privat
 
 	payin_tx_data = cJSON_CreateObject();
 	cJSON_AddStringToObject(payin_tx_data, "table_id", table_id);
-	cJSON_AddStringToObject(payin_tx_data, "msig_addr_nodes",
-				unstringify(cJSON_Print(cJSON_GetObjectItem(argjson, "msig_addr_nodes"))));
+	{ char *_j = cJSON_Print(cJSON_GetObjectItem(argjson, "msig_addr_nodes"));
+	  cJSON_AddStringToObject(payin_tx_data, "msig_addr_nodes", _j ? unstringify(_j) : "null");
+	  free(_j); }
 	cJSON_AddNumberToObject(payin_tx_data, "min_cashiers", threshold_value);
 	cJSON_AddStringToObject(payin_tx_data, "player_id", req_identifier);
 	cJSON_AddStringToObject(payin_tx_data, "dispute_addr", chips_get_new_address());
@@ -1626,9 +1770,11 @@ static int32_t bet_player_handle_stack_info_resp(cJSON *argjson, struct privateb
 
 	payin_tx_data = bet_player_make_payin_tx_data(argjson, bet);
 
-	hex_data_len = 2 * strlen(cJSON_Print(payin_tx_data)) + 1;
-	hex_data = calloc(hex_data_len, sizeof(char));
-	str_to_hexstr(cJSON_Print(payin_tx_data), hex_data);
+	{ char *_j = cJSON_Print(payin_tx_data);
+	  hex_data_len = _j ? 2 * strlen(_j) + 1 : 1;
+	  hex_data = calloc(hex_data_len, sizeof(char));
+	  if (_j) str_to_hexstr(_j, hex_data);
+	  free(_j); }
 
 	/*
 	dlg_info("funds_needed::%f", table_stake_in_chips);
@@ -1644,12 +1790,15 @@ static int32_t bet_player_handle_stack_info_resp(cJSON *argjson, struct privateb
 	if (txid == NULL) {
 		retval = ERR_CHIPS_INVALID_TX;
 		return retval;
-	} else {
-		retval = bet_store_game_info_details(cJSON_Print(txid), table_id);
 	}
-	dlg_info("tx id::%s", cJSON_Print(txid));
-	memset(player_payin_txid, 0x00, sizeof(player_payin_txid));
-	strcpy(player_payin_txid, cJSON_Print(txid));
+
+	char *_txid_str = cJSON_Print(txid);
+	if (_txid_str) {
+		retval = bet_store_game_info_details(_txid_str, table_id);
+		dlg_info("tx id::%s", _txid_str);
+		memset(player_payin_txid, 0x00, sizeof(player_payin_txid));
+		strncpy(player_payin_txid, _txid_str, sizeof(player_payin_txid) - 1);
+	}
 
 	retval = bet_update_payin_tx_across_cashiers(argjson, txid);
 	if (retval != OK) {
@@ -1663,13 +1812,14 @@ static int32_t bet_player_handle_stack_info_resp(cJSON *argjson, struct privateb
 	cJSON_AddStringToObject(tx_info, "chips_addr", chips_get_new_address());
 	cJSON_AddItemToObject(tx_info, "tx_info", txid);
 	dlg_info("Waiting for tx to confirm");
-	while (chips_get_block_hash_from_txid(cJSON_Print(txid)) == NULL) {
+	while (_txid_str && chips_get_block_hash_from_txid(_txid_str) == NULL) {
 		sleep(2);
 	}
-	dlg_info("TX ::%s got confirmed", cJSON_Print(txid));
+	if (_txid_str) dlg_info("TX ::%s got confirmed", _txid_str);
 	cJSON_AddNumberToObject(
 		tx_info, "block_height",
-		chips_get_block_height_from_block_hash(chips_get_block_hash_from_txid(cJSON_Print(txid))));
+		_txid_str ? chips_get_block_height_from_block_hash(chips_get_block_hash_from_txid(_txid_str)) : 0);
+	free(_txid_str);
 	// Nanomsg removed - no longer used
 	retval = OK;
 
@@ -1689,7 +1839,8 @@ int32_t bet_player_stack_info_req(struct privatebet_info *bet)
 	cJSON_AddStringToObject(stack_info_req, "method", "stack_info_req");
 	OS_randombytes(randval.bytes, sizeof(randval));
 	bits256_str(rand_str, randval);
-	strncpy(req_identifier, rand_str, sizeof(req_identifier));
+	strncpy(req_identifier, rand_str, sizeof(req_identifier) - 1);
+	req_identifier[sizeof(req_identifier) - 1] = '\0';
 	cJSON_AddStringToObject(stack_info_req, "id", rand_str);
 	cJSON_AddStringToObject(stack_info_req, "chips_addr", chips_get_new_address());
 	cJSON_AddNumberToObject(stack_info_req, "is_table_private", is_table_private);
@@ -1704,40 +1855,23 @@ int32_t bet_player_stack_info_req(struct privatebet_info *bet)
 
 static int32_t bet_player_process_payout_tx(cJSON *argjson)
 {
-	char *sql_query = NULL;
-	int32_t rc = OK;
+	DLG_JSON(info, "%s\n", argjson);
 
-	dlg_info("%s\n", cJSON_Print(argjson));
-	sql_query = calloc(sql_query_size, sizeof(char));
-	sprintf(sql_query, "UPDATE player_tx_mapping set status = 0,payout_tx_id = \'%s\' where table_id = \'%s\'",
-		jstr(argjson, "tx_info"), jstr(argjson, "table_id"));
-	rc = bet_run_query(sql_query);
-	if (rc != SQLITE_OK)
-		rc = ERR_SQL;
-	if (sql_query)
-		free(sql_query);
-	return rc;
+	const char *tx_info = jstr(argjson, "tx_info");
+	const char *tbl_id = jstr(argjson, "table_id");
+	if (tx_info == NULL || tbl_id == NULL) {
+		dlg_error("Invalid tx_info or table_id in payout_tx");
+		return ERR_ARGS_NULL;
+	}
+
+	return bet_sql_update_player_tx_payout_by_table(tx_info, tbl_id, 0);
 }
 
 static int32_t bet_player_process_game_info(cJSON *argjson)
 {
-	int argc = 3, retval = OK;
-	char **argv = NULL;
-	char *sql_query = calloc(sql_query_size, sizeof(char));
-
-	bet_alloc_args(argc, &argv);
-	strcpy(argv[0], "player_game_state");
-	sprintf(argv[1], "\'%s\'", table_id);
-	sprintf(argv[2], "\'%s\'", cJSON_Print(cJSON_GetObjectItem(argjson, "game_state")));
-
-	bet_make_insert_query(argc, argv, &sql_query);
-	retval = bet_run_query(sql_query);
-	if (retval != SQLITE_OK)
-		retval = ERR_SQL;
-
-	bet_dealloc_args(argc, &argv);
-	if (sql_query)
-		free(sql_query);
+	char *_gs_str = cJSON_Print(cJSON_GetObjectItem(argjson, "game_state"));
+	int32_t retval = bet_sql_insert_game_state("player_game_state", table_id, _gs_str ? _gs_str : "");
+	free(_gs_str);
 	return retval;
 }
 
@@ -1748,7 +1882,7 @@ static void bet_update_seat_info(cJSON *argjson)
 	seats_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(seats_info, "method", "seats");
 	cJSON_AddItemToObject(seats_info, "seats", cJSON_GetObjectItem(argjson, "seats"));
-	dlg_info("%s", cJSON_Print(seats_info));
+	DLG_JSON(info, "%s", seats_info);
 	player_lws_write(seats_info);
 }
 
@@ -1773,6 +1907,7 @@ void bet_handle_player_error(struct privatebet_info *bet, int32_t err_no)
 		break;
 	case ERR_DEALER_TABLE_FULL:
 		bet_raise_dispute(player_payin_txid);
+		break;
 	case ERR_LN_ADDRESS_TYPE_MISMATCH:
 	case ERR_INVALID_POS:
 	case ERR_CHIPS_INSUFFICIENT_FUNDS:
@@ -1820,7 +1955,7 @@ int32_t bet_player_backend(cJSON *argjson, struct privatebet_info *bet, struct p
 		} else if (strcmp(method, "init") == 0) {
 			if (jint(argjson, "peerid") == bet->myplayerid) {
 				bet_player_blinds_info();
-				dlg_info("myplayerid::%d::init::%s\n", bet->myplayerid, cJSON_Print(argjson));
+				{ char *_j = cJSON_Print(argjson); dlg_info("myplayerid::%d::init::%s\n", bet->myplayerid, _j ? _j : "null"); free(_j); }
 				retval = bet_client_init(argjson, bet, vars);
 			}
 		} else if (strcmp(method, "init_d") == 0) {
@@ -1937,16 +2072,16 @@ int32_t bet_player_backend(cJSON *argjson, struct privatebet_info *bet, struct p
 			if (strncmp(req_identifier, jstr(argjson, "id"), sizeof(req_identifier)) == 0) {
 				if (jint(argjson, "dcv_state") == 1) {
 					dlg_warn("DCV which you trying to connect is full");
-					dlg_info("%s\n", cJSON_Print(argjson));
+					DLG_JSON(info, "%s\n", argjson);
 					bet_player_reset(bet, vars);
 					retval = ERR_DEALER_TABLE_FULL;
 				}
 			}
 		} else if (strcmp(method, "tx_reverse") == 0) {
 			if (strncmp(req_identifier, jstr(argjson, "id"), sizeof(req_identifier)) == 0) {
-				dlg_warn(
+				DLG_JSON(warn,
 					"The dealers table is already full, the payin_tx will be reversed using dispute resolution protocol::%s\n",
-					cJSON_Print(argjson));
+					argjson);
 				bet_raise_dispute(player_payin_txid);
 				retval = ERR_DEALER_TABLE_FULL;
 			}
@@ -2075,7 +2210,8 @@ void rest_push_cards(struct lws *wsi, cJSON *argjson, int32_t this_playerID)
 	cJSON_AddItemToObject(init_card_info, "board", board_card_info);
 
 	cJSON_AddItemToObject(init_info, "deal", init_card_info);
-	lws_write(wsi, (unsigned char *)cJSON_Print(init_info), strlen(cJSON_Print(init_info)), 0);
+	{ char *_j = cJSON_Print(init_info);
+	  if (_j) { lws_write(wsi, (unsigned char *)_j, strlen(_j), 0); free(_j); } }
 }
 
 void rest_display_cards(cJSON *argjson, int32_t this_playerID)

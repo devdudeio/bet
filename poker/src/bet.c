@@ -93,8 +93,10 @@ int32_t bet_node_type;
 
 static void bet_cashier_deinitialize()
 {
-	if (cashier_info)
+	if (cashier_info) {
+		if (cashier_info->msg) cJSON_Delete(cashier_info->msg);
 		free(cashier_info);
+	}
 }
 
 static void bet_player_initialize(char *dcv_ip)
@@ -192,8 +194,10 @@ static int32_t bet_dcv_initialize(char *dcv_ip)
 
 static void bet_dcv_deinitialize()
 {
-	if (bet_dcv)
+	if (bet_dcv) {
+		if (bet_dcv->msg) cJSON_Delete(bet_dcv->msg);
 		free(bet_dcv);
+	}
 	if (dcv_vars)
 		free(dcv_vars);
 }
@@ -302,7 +306,7 @@ static void playing_nodes_init()
 static void dealer_node_init()
 {
 	if (0 == strlen(dcv_hosted_gui_url)) {
-		sprintf(dcv_hosted_gui_url, "http://%s:1234/", dealer_ip);
+		snprintf(dcv_hosted_gui_url, sizeof(dcv_hosted_gui_url), "http://%s:1234/", dealer_ip);
 	}
 	dlg_warn("Delaer GUI URL :: %s", dcv_hosted_gui_url); // dlg_warn is just to highlight the log in the console
 	if (0 == check_url(dcv_hosted_gui_url))
@@ -336,7 +340,7 @@ static char *bet_pick_dealer()
 	cJSON *available_dealers = NULL;
 
 	available_dealers = bet_get_available_dealers();
-	dlg_info("Available dealers :: %s", cJSON_Print(available_dealers));
+	DLG_JSON(info, "Available dealers :: %s", available_dealers);
 
 	for (int32_t i = 0; i < cJSON_GetArraySize(available_dealers); i++) {
 		cJSON *temp = cJSON_GetArrayItem(available_dealers, i);
@@ -551,7 +555,8 @@ void bet_start(int argc, char **argv)
 		const char *id = argv[2];
 		if (id_cansignfor(id, 0, &retval)) {
 			cJSON *out = update_cmm(id, NULL);
-			dlg_info("Reset ID '%s': %s", id, cJSON_Print(out));
+			dlg_info("Reset ID '%s':", id);
+			DLG_JSON(info, "  %s", out);
 		} else {
 			dlg_error("Cannot sign for ID: %s", id);
 		}
@@ -580,7 +585,7 @@ void bet_start(int argc, char **argv)
 		const char *what = argv[2];
 		if (strcmp(what, "dealers") == 0) {
 			cJSON *dealers = poker_list_dealers();
-			if (dealers) dlg_info("%s", cJSON_Print(dealers));
+			if (dealers) DLG_JSON(info, "%s", dealers);
 		} else if (strcmp(what, "tables") == 0) {
 			poker_list_tables();
 		} else {
@@ -612,7 +617,7 @@ void bet_start(int argc, char **argv)
 		double amount = chips_get_balance() - chips_tx_fee;
 		tx = chips_transfer_funds(amount, chips_get_new_address());
 		if (tx) {
-			dlg_info("Consolidated tx::%s", cJSON_Print(tx));
+			DLG_JSON(info, "Consolidated tx::%s", tx);
 		}
 	} else if (strcmp(cmd, "withdraw") == 0) {
 		if (argc == 4) {
@@ -622,7 +627,7 @@ void bet_start(int argc, char **argv)
 				: atof(argv[2]);
 			tx = chips_transfer_funds(amount, argv[3]);
 			if (tx) {
-				dlg_info("tx details::%s", cJSON_Print(tx));
+				DLG_JSON(info, "tx details::%s", tx);
 			}
 		} else {
 			bet_help_withdraw_command_usage();
@@ -631,7 +636,7 @@ void bet_start(int argc, char **argv)
 		do_split_tx_amount(atof(argv[2]), atoi(argv[3]));
 	} else if (strcmp(cmd, "spendable") == 0) {
 		cJSON *spendable_tx = chips_spendable_tx();
-		dlg_info("CHIPS Spendable tx's :: %s\n", cJSON_Print(spendable_tx));
+		DLG_JSON(info, "CHIPS Spendable tx's :: %s\n", spendable_tx);
 	} else if (strcmp(cmd, "balance") == 0) {
 		double balance = chips_get_balance();
 		dlg_info("CHIPS Balance: %.8f", balance);
@@ -644,7 +649,7 @@ void bet_start(int argc, char **argv)
 		if (argc == 3) {
 			cJSON *temp = chips_extract_tx_data_in_JSON(argv[2]);
 			if (temp) {
-				dlg_info("%s", cJSON_Print(temp));
+				DLG_JSON(info, "%s", temp);
 			}
 		} else {
 			bet_help_extract_tx_data_command_usage();
@@ -684,7 +689,7 @@ void bet_start(int argc, char **argv)
 	else if (strcmp(cmd, "reset_id") == 0 && argc == 3) {
 		if (id_cansignfor(argv[2], 0, &retval)) {
 			cJSON *out = update_cmm(argv[2], NULL);
-			dlg_info("%s", cJSON_Print(out));
+			DLG_JSON(info, "%s", out);
 		}
 	}
 	// Dispute resolution
@@ -698,7 +703,7 @@ void bet_start(int argc, char **argv)
 			else if (strcmp(argv[2], "check") == 0) {
 				cJSON *result = player_check_dispute_result(argv[3]);
 				if (result) {
-					dlg_info("Dispute result: %s", cJSON_Print(result));
+					DLG_JSON(info, "Dispute result: %s", result);
 				} else {
 					dlg_info("No dispute result found for game %s", argv[3]);
 				}

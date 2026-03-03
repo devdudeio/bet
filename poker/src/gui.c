@@ -16,23 +16,36 @@
 static const char SUITS[] = "cdhs";  // clubs, diamonds, hearts, spades
 static const char RANKS[] = "23456789TJQKA";
 
-// Static buffer for card strings (not thread-safe, but fine for single-threaded use)
-static char card_str_buffer[4];
+// Rotating buffer for card strings — allows multiple calls in a single printf
+#define CARD_STR_BUFFERS 8
+static _Thread_local char card_str_buffers[CARD_STR_BUFFERS][4];
+static _Thread_local int card_str_idx = 0;
 
 const char *card_value_to_string(int32_t card_value)
 {
     if (card_value < 0 || card_value > 51) {
         return "??";
     }
-    
+
+    char *buf = card_str_buffers[card_str_idx];
+    card_str_idx = (card_str_idx + 1) % CARD_STR_BUFFERS;
+
     int32_t suit = card_value / 13;
     int32_t rank = card_value % 13;
-    
-    card_str_buffer[0] = RANKS[rank];
-    card_str_buffer[1] = SUITS[suit];
-    card_str_buffer[2] = '\0';
-    
-    return card_str_buffer;
+
+    // rank 8 = '10' (index 8 in "23456789TJQKA"), needs 3 chars
+    if (rank == 8) {
+        buf[0] = '1';
+        buf[1] = '0';
+        buf[2] = SUITS[suit];
+        buf[3] = '\0';
+    } else {
+        buf[0] = RANKS[rank];
+        buf[1] = SUITS[suit];
+        buf[2] = '\0';
+    }
+
+    return buf;
 }
 
 cJSON *cards_to_json_array(int32_t *cards, int32_t count)
@@ -41,8 +54,8 @@ cJSON *cards_to_json_array(int32_t *cards, int32_t count)
     for (int32_t i = 0; i < count; i++) {
         if (cards[i] >= 0 && cards[i] <= 51) {
             // Need to create a copy since card_value_to_string uses static buffer
-            char card_copy[4];
-            strncpy(card_copy, card_value_to_string(cards[i]), sizeof(card_copy));
+            char card_copy[8] = {0};
+            strncpy(card_copy, card_value_to_string(cards[i]), sizeof(card_copy) - 1);
             cJSON_AddItemToArray(arr, cJSON_CreateString(card_copy));
         }
     }
@@ -143,9 +156,9 @@ cJSON *gui_build_deal_holecards(int32_t card1, int32_t card2, double balance)
     cJSON *holecards = cJSON_CreateArray();
     
     // Convert card values to strings
-    char c1[4], c2[4];
-    strncpy(c1, card_value_to_string(card1), sizeof(c1));
-    strncpy(c2, card_value_to_string(card2), sizeof(c2));
+    char c1[8] = {0}, c2[8] = {0};
+    strncpy(c1, card_value_to_string(card1), sizeof(c1) - 1);
+    strncpy(c2, card_value_to_string(card2), sizeof(c2) - 1);
     
     cJSON_AddItemToArray(holecards, cJSON_CreateString(c1));
     cJSON_AddItemToArray(holecards, cJSON_CreateString(c2));
@@ -167,8 +180,8 @@ cJSON *gui_build_deal_board(int32_t *board_cards, int32_t count)
     
     for (int32_t i = 0; i < count && i < 5; i++) {
         if (board_cards[i] >= 0) {
-            char card[4];
-            strncpy(card, card_value_to_string(board_cards[i]), sizeof(card));
+            char card[8] = {0};
+            strncpy(card, card_value_to_string(board_cards[i]), sizeof(card) - 1);
             cJSON_AddItemToArray(board, cJSON_CreateString(card));
         }
     }
@@ -221,11 +234,11 @@ cJSON *gui_build_betting_action(int32_t playerid, const char *action, double bet
 }
 
 cJSON *gui_build_final_info(int32_t *winners, int32_t winner_count, double win_amount,
-                            int32_t **all_holecards, int32_t *board_cards)
+                            int32_t **all_holecards, int32_t *board_cards, int32_t num_players)
 {
     cJSON *msg = cJSON_CreateObject();
     cJSON_AddStringToObject(msg, "method", "finalInfo");
-    
+
     // Winners array
     cJSON *winners_arr = cJSON_CreateArray();
     for (int32_t i = 0; i < winner_count; i++) {
@@ -233,21 +246,20 @@ cJSON *gui_build_final_info(int32_t *winners, int32_t winner_count, double win_a
     }
     cJSON_AddItemToObject(msg, "winners", winners_arr);
     cJSON_AddNumberToObject(msg, "win_amount", win_amount);
-    
+
     // Show info
     cJSON *show_info = cJSON_CreateObject();
-    
+
     // All hole cards info
     if (all_holecards) {
         cJSON *all_holes = cJSON_CreateArray();
-        // Assuming 2 players with 2 cards each for now
-        for (int32_t p = 0; p < 2; p++) {
+        for (int32_t p = 0; p < num_players; p++) {
             cJSON *player_cards = cJSON_CreateArray();
             if (all_holecards[p]) {
                 for (int32_t c = 0; c < 2; c++) {
                     if (all_holecards[p][c] >= 0) {
-                        char card[4];
-                        strncpy(card, card_value_to_string(all_holecards[p][c]), sizeof(card));
+                        char card[8] = {0};
+                        strncpy(card, card_value_to_string(all_holecards[p][c]), sizeof(card) - 1);
                         cJSON_AddItemToArray(player_cards, cJSON_CreateString(card));
                     }
                 }
@@ -256,7 +268,7 @@ cJSON *gui_build_final_info(int32_t *winners, int32_t winner_count, double win_a
         }
         cJSON_AddItemToObject(show_info, "allHoleCardsInfo", all_holes);
     }
-    
+
     // Board cards
     if (board_cards) {
         cJSON *board = cJSON_CreateArray();
@@ -269,7 +281,7 @@ cJSON *gui_build_final_info(int32_t *winners, int32_t winner_count, double win_a
         }
         cJSON_AddItemToObject(show_info, "boardCardInfo", board);
     }
-    
+
     cJSON_AddItemToObject(msg, "showInfo", show_info);
     return msg;
 }

@@ -27,7 +27,7 @@ cJSON *gui_build_betting_round(int32_t playerid, double pot, double to_call, dou
                                int32_t *possibilities, int32_t poss_count, double *player_funds, int32_t num_players);
 cJSON *gui_build_betting_action(int32_t playerid, const char *action, double bet_amount);
 cJSON *gui_build_final_info(int32_t *winners, int32_t winner_count, double win_amount,
-                            int32_t **all_holecards, int32_t *board_cards);
+                            int32_t **all_holecards, int32_t *board_cards, int32_t num_players);
 
 #endif /* GUI_H */
 

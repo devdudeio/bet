@@ -97,7 +97,7 @@ void bet_compute_m_of_n_msig_addr()
 {
 	cJSON *msig_addr = NULL;
 	msig_addr = chips_add_multisig_address();
-	dlg_info("The msig_address of the cashier nodes for payin tx \n %s", cJSON_Print(msig_addr));
+	DLG_JSON(info, "The msig_address of the cashier nodes for payin tx \n %s", msig_addr);
 	if (msig_addr) {
 		const char *addr = jstr(msig_addr, "address");
 		if (addr == NULL) {
@@ -186,7 +186,10 @@ int32_t bet_process_lock_in_tx(cJSON *argjson, struct cashier *cashier_info)
 	int32_t retval = OK;
 	cJSON *status = NULL;
 
-	retval = bet_run_query(jstr(argjson, "sql_query"));
+	/* SQL injection protection: reject raw SQL from network messages.
+	 * The lock-in transaction should use parameterized queries instead. */
+	dlg_error("bet_process_lock_in_tx: raw SQL execution from network is disabled for security");
+	retval = ERR_SQL;
 	status = cJSON_CreateObject();
 	cJSON_AddStringToObject(status, "method", "query_status");
 	cJSON_AddNumberToObject(status, "status", retval);
@@ -205,7 +208,8 @@ int32_t bet_cashier_process_raw_msig_tx(cJSON *argjson, struct cashier *cashier_
 	cJSON_AddStringToObject(signed_tx, "id", jstr(argjson, "id"));
 	tx = cJSON_Print(cJSON_GetObjectItem(argjson, "tx"));
 	cJSON_AddItemToObject(signed_tx, "signed_tx", chips_sign_raw_tx_with_wallet(tx));
-	dlg_info("signed_tx::%s", cJSON_Print(signed_tx));
+	free(tx);
+	DLG_JSON(info, "signed_tx::%s", signed_tx);
 // Nanomsg removed - no longer used
 	return retval;
 }
@@ -213,40 +217,19 @@ int32_t bet_cashier_process_raw_msig_tx(cJSON *argjson, struct cashier *cashier_
 int32_t bet_process_payout_tx(cJSON *argjson, struct cashier *cashier_info)
 {
 	int32_t retval = OK;
-	char *sql_query = NULL;
 	const char *tx_info_str = NULL;
 	const char *table_id_str = NULL;
-	int required_size;
 
 	tx_info_str = cJSON_Print(cJSON_GetObjectItem(argjson, "tx_info"));
 	table_id_str = jstr(argjson, "table_id");
 	if (tx_info_str == NULL || table_id_str == NULL) {
 		dlg_error("Invalid tx_info or table_id");
+		if (tx_info_str) free((void *)tx_info_str);
 		return ERR_ARGS_NULL;
 	}
 
-	required_size = snprintf(NULL, 0,
-		"UPDATE c_tx_addr_mapping set payin_tx_id_status = 0, payout_tx_id = %s where table_id = \"%s\";",
-		tx_info_str, table_id_str) + 1;
-
-	if (required_size > sql_query_size) {
-		sql_query = calloc(required_size, sizeof(char));
-	} else {
-		sql_query = calloc(sql_query_size, sizeof(char));
-	}
-	if (sql_query == NULL) {
-		if (tx_info_str) free((void *)tx_info_str);
-		return ERR_MEMORY_ALLOC;
-	}
-
-	snprintf(sql_query, required_size,
-		"UPDATE c_tx_addr_mapping set payin_tx_id_status = 0, payout_tx_id = %s where table_id = \"%s\";",
-		tx_info_str, table_id_str);
-	dlg_info("sql_query::%s", sql_query);
-	retval = bet_run_query(sql_query);
-	if (tx_info_str) free((void *)tx_info_str);
-	if (sql_query)
-		free(sql_query);
+	retval = bet_sql_update_c_tx_payout(tx_info_str, table_id_str);
+	free((void *)tx_info_str);
 
 	return retval;
 }
@@ -254,38 +237,20 @@ int32_t bet_process_payout_tx(cJSON *argjson, struct cashier *cashier_info)
 int32_t bet_process_game_info(cJSON *argjson, struct cashier *cashier_info)
 {
 	int32_t retval = OK;
-	char *sql_query = NULL;
 	cJSON *game_state = NULL;
 
 	game_state = cJSON_GetObjectItem(argjson, "game_state");
 	const char *table_id_str = jstr(argjson, "table_id");
 	const char *game_state_str = cJSON_Print(game_state);
-	int required_size;
 
 	if (table_id_str == NULL || game_state_str == NULL) {
 		dlg_error("Invalid table_id or game_state");
+		if (game_state_str) free((void *)game_state_str);
 		return ERR_ARGS_NULL;
 	}
 
-	required_size = snprintf(NULL, 0, "INSERT into cashier_game_state values(\"%s\", \'%s\');",
-		table_id_str, game_state_str) + 1;
-
-	if (required_size > sql_query_size) {
-		sql_query = calloc(required_size, sizeof(char));
-	} else {
-		sql_query = calloc(sql_query_size, sizeof(char));
-	}
-	if (sql_query == NULL) {
-		if (game_state_str) free((void *)game_state_str);
-		return ERR_MEMORY_ALLOC;
-	}
-
-	snprintf(sql_query, required_size, "INSERT into cashier_game_state values(\"%s\", \'%s\');",
-		table_id_str, game_state_str);
-	retval = bet_run_query(sql_query);
-	if (game_state_str) free((void *)game_state_str);
-	if (sql_query)
-		free(sql_query);
+	retval = bet_sql_insert_cashier_game_state(table_id_str, game_state_str);
+	free((void *)game_state_str);
 	return retval;
 }
 
@@ -298,8 +263,11 @@ cJSON *bet_resolve_game_dispute(cJSON *game_info)
 	char **cashier_node_ips = NULL;
 	int32_t no_of_cashier_nodes, approved_cashiers_count = 0, ip_length = 20;
 
-	msig_addr_nodes = cJSON_CreateArray();
 	msig_addr_nodes = cJSON_Parse(jstr(game_info, "msig_addr_nodes"));
+	if (msig_addr_nodes == NULL) {
+		dlg_error("Failed to parse msig_addr_nodes");
+		return NULL;
+	}
 
 	no_of_cashier_nodes = cJSON_GetArraySize(msig_addr_nodes);
 	cashier_node_status = calloc(no_of_cashier_nodes, sizeof(int));
@@ -307,6 +275,7 @@ cJSON *bet_resolve_game_dispute(cJSON *game_info)
 	cashier_node_ips = calloc(no_of_cashier_nodes, sizeof(char *));
 
 	if (cashier_node_status == NULL || validation_status == NULL || cashier_node_ips == NULL) {
+		cJSON_Delete(msig_addr_nodes);
 		if (cashier_node_status) free(cashier_node_status);
 		if (validation_status) free(validation_status);
 		if (cashier_node_ips) free(cashier_node_ips);
@@ -382,7 +351,7 @@ cJSON *bet_resolve_game_dispute(cJSON *game_info)
 			tx_ids[0][0] = '\0';
 		}
 		raw_tx = chips_create_tx_from_tx_list(jstr(game_info, "addr"), no_of_in_txs, tx_ids);
-		dlg_info("raw_tx::%s", cJSON_Print(raw_tx));
+		DLG_JSON(info, "raw_tx::%s", raw_tx);
 		for (int i = 0; i < no_of_cashier_nodes; i++) {
 			if (cashier_node_status[i] == 1) {
 				if (signers == 0) {
@@ -408,7 +377,7 @@ cJSON *bet_resolve_game_dispute(cJSON *game_info)
 					if (cJSON_GetObjectItem(temp1, "signed_tx") != NULL) {
 						cJSON *status = cJSON_GetObjectItem(
 							cJSON_GetObjectItem(temp1, "signed_tx"), "complete");
-						if (strcmp(cJSON_Print(status), "true") == 0) {
+						if (is_cJSON_True(status)) {
 							tx = chips_send_raw_tx(cJSON_GetObjectItem(temp1, "signed_tx"));
 							signers++;
 							break;
@@ -421,41 +390,23 @@ cJSON *bet_resolve_game_dispute(cJSON *game_info)
 			}
 		}
 		if (tx) {
-			dlg_info("Final payout tx::%s", cJSON_Print(tx));
+			DLG_JSON(info, "Final payout tx::%s", tx);
 			cJSON *update_tx_info = NULL;
 			update_tx_info = cJSON_CreateObject();
 			cJSON_AddStringToObject(update_tx_info, "method", "tx_spent");
 			cJSON_AddStringToObject(update_tx_info, "payin_tx_id", jstr(game_info, "tx_id"));
-			cJSON_AddStringToObject(update_tx_info, "payout_tx_id", unstringify(cJSON_Print(tx)));
+			char *_tx_str = cJSON_Print(tx);
+			cJSON_AddStringToObject(update_tx_info, "payout_tx_id", unstringify(_tx_str));
+			free(_tx_str);
 			bet_msg_multiple_cashiers(update_tx_info, cashier_node_ips, no_of_cashier_nodes);
-			char *sql_query = NULL;
 			const char *tx_id_str = jstr(game_info, "tx_id");
-			int required_size;
 
 			if (tx_id_str == NULL) {
 				dlg_error("Invalid tx_id in game_info");
-				free_json(update_tx_info);
 			} else {
-				required_size = snprintf(NULL, 0, "UPDATE player_tx_mapping set status = 0 where tx_id = \'%s\';",
-					tx_id_str) + 1;
-
-				if (required_size > sql_query_size) {
-					sql_query = calloc(required_size, sizeof(char));
-				} else {
-					sql_query = calloc(sql_query_size, sizeof(char));
-				}
-				if (sql_query == NULL) {
-					dlg_error("Memory allocation failed for sql_query");
-					free_json(update_tx_info);
-				} else {
-					snprintf(sql_query, required_size, "UPDATE player_tx_mapping set status = 0 where tx_id = \'%s\';",
-						tx_id_str);
-					bet_run_query(sql_query);
-					if (sql_query)
-						free(sql_query);
-					free_json(update_tx_info);
-				}
+				bet_sql_update_player_tx_status(tx_id_str, 0);
 			}
+			free_json(update_tx_info);
 		}
 	}
 
@@ -467,7 +418,6 @@ void bet_process_solve(cJSON *argjson, struct cashier *cashier_info)
 {
 	cJSON *disputed_games_info = NULL;
 
-	disputed_games_info = cJSON_CreateArray();
 	disputed_games_info = cJSON_GetObjectItem(argjson, "disputed_games_info");
 
 	bet_check_cashiers_status();
@@ -504,39 +454,15 @@ void bet_cashier_status_loop(void *_ptr)
 
 static int32_t bet_update_tx_spent(cJSON *argjson)
 {
-	int retval = OK;
-	char *sql_query = NULL;
-
 	const char *payout_tx_id_str = jstr(argjson, "payout_tx_id");
 	const char *payin_tx_id_str = jstr(argjson, "payin_tx_id");
-	int required_size;
 
 	if (payout_tx_id_str == NULL || payin_tx_id_str == NULL) {
 		dlg_error("Invalid payout_tx_id or payin_tx_id");
 		return ERR_ARGS_NULL;
 	}
 
-	required_size = snprintf(NULL, 0,
-		"UPDATE c_tx_addr_mapping set payin_tx_id_status = 0, payout_tx_id = \'%s\' where payin_tx_id_status =\'%s\';",
-		payout_tx_id_str, payin_tx_id_str) + 1;
-
-	if (required_size > sql_query_size) {
-		sql_query = calloc(required_size, sizeof(char));
-	} else {
-		sql_query = calloc(sql_query_size, sizeof(char));
-	}
-	if (sql_query == NULL) {
-		return ERR_MEMORY_ALLOC;
-	}
-
-	snprintf(sql_query, required_size,
-		"UPDATE c_tx_addr_mapping set payin_tx_id_status = 0, payout_tx_id = \'%s\' where payin_tx_id_status =\'%s\';",
-		payout_tx_id_str, payin_tx_id_str);
-	retval = bet_run_query(sql_query);
-	if (sql_query)
-		free(sql_query);
-
-	return retval;
+	return bet_sql_update_c_tx_by_payin(payout_tx_id_str, payin_tx_id_str);
 }
 
 static cJSON *bet_reverse_disputed_tx(cJSON *game_info)
@@ -548,14 +474,18 @@ static cJSON *bet_reverse_disputed_tx(cJSON *game_info)
 	int32_t no_of_cashier_nodes, ip_addr_len = 20;
 	cJSON *tx = NULL;
 
-	msig_addr_nodes = cJSON_CreateArray();
 	msig_addr_nodes = cJSON_Parse(jstr(game_info, "msig_addr_nodes"));
+	if (msig_addr_nodes == NULL) {
+		dlg_error("Failed to parse msig_addr_nodes");
+		return NULL;
+	}
 
 	no_of_cashier_nodes = cJSON_GetArraySize(msig_addr_nodes);
 	cashier_node_status = calloc(no_of_cashier_nodes, sizeof(int));
 	cashier_node_ips = calloc(no_of_cashier_nodes, sizeof(char *));
 
 	if (cashier_node_status == NULL || cashier_node_ips == NULL) {
+		cJSON_Delete(msig_addr_nodes);
 		if (cashier_node_status) free(cashier_node_status);
 		if (cashier_node_ips) free(cashier_node_ips);
 		return NULL;
@@ -618,21 +548,21 @@ static cJSON *bet_reverse_disputed_tx(cJSON *game_info)
 		if (raw_tx == NULL)
 			return NULL;
 		tx_to_sign = raw_tx;
-		dlg_info("tx_to_sign::%s", cJSON_Print(tx_to_sign));
+		DLG_JSON(info, "tx_to_sign::%s", tx_to_sign);
 
 		for (int i = 0; i < no_of_cashier_nodes; i++) {
 			if (cashier_node_status[i] == 1) {
 				cJSON *temp = chips_sign_msig_tx(cashier_node_ips[i], tx_to_sign);
 				if (temp == NULL)
 					continue;
-				dlg_info("signed_tx::%s", cJSON_Print(temp));
+				DLG_JSON(info, "signed_tx::%s", temp);
 				if (cJSON_GetObjectItem(temp, "signed_tx") != NULL) {
 					tx_to_sign = cJSON_GetObjectItem(cJSON_GetObjectItem(temp, "signed_tx"), "hex");
 					signers++;
 					if (signers == min_cashiers) {
 						cJSON *status = cJSON_GetObjectItem(
 							cJSON_GetObjectItem(temp, "signed_tx"), "complete");
-						if (strcmp(cJSON_Print(status), "true") == 0) {
+						if (is_cJSON_True(status)) {
 							tx = chips_send_raw_tx(cJSON_GetObjectItem(temp, "signed_tx"));
 						}
 						if (tx)
@@ -648,11 +578,11 @@ static cJSON *bet_reverse_disputed_tx(cJSON *game_info)
 					cJSON *temp1 = chips_sign_msig_tx(cashier_node_ips[i], hex);
 					if (temp1 == NULL)
 						continue;
-					dlg_info("signed_tx::%s", cJSON_Print(temp1));
+					DLG_JSON(info, "signed_tx::%s", temp1);
 					if (cJSON_GetObjectItem(temp1, "signed_tx") != NULL) {
 						cJSON *status = cJSON_GetObjectItem(
 							cJSON_GetObjectItem(temp1, "signed_tx"), "complete");
-						if (strcmp(cJSON_Print(status), "true") == 0) {
+						if (cJSON_IsTrue(status)) {
 							tx = chips_send_raw_tx(cJSON_GetObjectItem(temp1, "signed_tx"));
 							signers++;
 							break;
@@ -666,7 +596,7 @@ static cJSON *bet_reverse_disputed_tx(cJSON *game_info)
 			}
 		}
 		if (1 == fully_signed) {
-			dlg_info("Final payout tx::%s", cJSON_Print(tx));
+			DLG_JSON(info, "Final payout tx::%s", tx);
 		}
 	}
 
@@ -709,7 +639,7 @@ int32_t bet_process_dispute(cJSON *argjson, struct cashier *cashier_info)
 			return ERR_JSON_PARSING;
 		}
 
-		dlg_info("%s", cJSON_Print(player_info));
+		DLG_JSON(info, "%s", player_info);
 		cJSON_AddStringToObject(player_info, "tx_id", jstr(argjson, "tx_id"));
 		bet_check_cashiers_status();
 		tx = bet_reverse_disputed_tx(player_info);
@@ -721,7 +651,7 @@ int32_t bet_process_dispute(cJSON *argjson, struct cashier *cashier_info)
 	if (data) free(data);
 	if (player_info) cJSON_Delete(player_info);
 
-	dlg_info("%s", cJSON_Print(dispute_response));
+	DLG_JSON(info, "%s", dispute_response);
 	// Nanomsg removed - no longer used
 	retval = OK;
 	return retval;
@@ -729,34 +659,14 @@ int32_t bet_process_dispute(cJSON *argjson, struct cashier *cashier_info)
 
 static int32_t bet_process_dealer_info(cJSON *argjson)
 {
-	int32_t retval = OK;
-	char *sql_query = NULL;
-
 	const char *ip_str = jstr(argjson, "ip");
-	int required_size;
 
 	if (ip_str == NULL) {
 		dlg_error("Invalid ip in argjson");
 		return ERR_ARGS_NULL;
 	}
 
-	required_size = snprintf(NULL, 0, "INSERT OR IGNORE into dealers_info values(\'%s\');", ip_str) + 1;
-
-	if (required_size > sql_query_size) {
-		sql_query = calloc(required_size, sizeof(char));
-	} else {
-		sql_query = calloc(sql_query_size, sizeof(char));
-	}
-	if (sql_query == NULL) {
-		return ERR_MEMORY_ALLOC;
-	}
-
-	snprintf(sql_query, required_size, "INSERT OR IGNORE into dealers_info values(\'%s\');", ip_str);
-	retval = bet_run_query(sql_query);
-	if (sql_query)
-		free(sql_query);
-
-	return retval;
+	return bet_sql_insert_dealer(ip_str);
 }
 
 static int32_t bet_process_rqst_dealer_info(cJSON *argjson, struct cashier *cashier_info)
@@ -770,7 +680,7 @@ static int32_t bet_process_rqst_dealer_info(cJSON *argjson, struct cashier *cash
 	cJSON_AddStringToObject(response_info, "method", "rqst_dealer_info_response");
 	cJSON_AddStringToObject(response_info, "id", jstr(argjson, "id"));
 	dealer_ips = sqlite3_get_dealer_info_details();
-	dlg_info("%s", cJSON_Print(dealer_ips));
+	DLG_JSON(info, "%s", dealer_ips);
 	active_dealers = cJSON_CreateArray();
 
 	dcv_state_rqst = cJSON_CreateObject();
@@ -778,9 +688,11 @@ static int32_t bet_process_rqst_dealer_info(cJSON *argjson, struct cashier *cash
 	cJSON_AddStringToObject(dcv_state_rqst, "id", unique_id);
 
 	for (int32_t i = 0; i < cJSON_GetArraySize(dealer_ips); i++) {
+		char *_ip_str = cJSON_Print(cJSON_GetArrayItem(dealer_ips, i));
 		dcv_state_info = bet_msg_dealer_with_response_id(
-			dcv_state_rqst, unstringify(cJSON_Print(cJSON_GetArrayItem(dealer_ips, i))), "dcv_state");
-		dlg_info("dcv_state_info::%s", cJSON_Print(dcv_state_info));
+			dcv_state_rqst, unstringify(_ip_str), "dcv_state");
+		free(_ip_str);
+		DLG_JSON(info, "dcv_state_info::%s", dcv_state_info);
 		if (dcv_state_info) {
 			cJSON *temp = cJSON_CreateObject();
 			cJSON_AddStringToObject(temp, "ip", jstri(dealer_ips, i));
@@ -871,7 +783,7 @@ void bet_cashier_backend_thrd(void *_ptr)
 		} else if (strcmp(method, "game_multisigaddress") == 0) {
 			cJSON *msig_info = chips_add_multisig_address_from_list(
 				jint(argjson, "threshold_value"), cJSON_GetObjectItem(argjson, "pubkeys"));
-			dlg_info("msig_info::%s", cJSON_Print(msig_info));
+			DLG_JSON(info, "msig_info::%s", msig_info);
 		}
 	}
 	if (retval != OK) {
@@ -978,7 +890,7 @@ void bet_resolve_disputed_tx()
 	disputed_games_info = sqlite3_get_game_details(1);
 	cJSON_AddItemToObject(argjson, "disputed_games_info", disputed_games_info);
 
-	dlg_info("Disputed games info::%s", cJSON_Print(argjson));
+	DLG_JSON(info, "Disputed games info::%s", argjson);
 
 	for (int32_t i = 0; i < cJSON_GetArraySize(disputed_games_info); i++) {
 		bet_raise_dispute(unstringify(jstr(cJSON_GetArrayItem(disputed_games_info, i), "tx_id")));
@@ -989,7 +901,6 @@ void bet_raise_dispute(char *tx_id)
 {
 	cJSON *dispute_info = NULL;
 	cJSON *response_info = NULL;
-	char *sql_query = NULL;
 
 	dispute_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(dispute_info, "method", "dispute");
@@ -1007,7 +918,6 @@ void bet_raise_dispute(char *tx_id)
 
 	const char *payout_tx_str = NULL;
 	const char *tx_id_str = jstr(dispute_info, "tx_id");
-	int required_size;
 
 	if ((response_info) && (jstr(response_info, "payout_tx"))) {
 		payout_tx_str = jstr(response_info, "payout_tx");
@@ -1016,9 +926,7 @@ void bet_raise_dispute(char *tx_id)
 			dlg_error("Invalid payout_tx or tx_id");
 			return;
 		}
-		required_size = snprintf(NULL, 0,
-			"UPDATE player_tx_mapping set status = 0, payout_tx_id = \'%s\' where tx_id = \'%s\';",
-			payout_tx_str, tx_id_str) + 1;
+		bet_sql_update_player_tx_payout(payout_tx_str, tx_id_str, 0);
 	} else {
 		dlg_info("Notaries are failed to recover this disputed tx :: %s", tx_id_str);
 		payout_tx_str = jstr(response_info, "payout_tx");
@@ -1026,33 +934,8 @@ void bet_raise_dispute(char *tx_id)
 			dlg_error("Invalid payout_tx or tx_id");
 			return;
 		}
-		required_size = snprintf(NULL, 0,
-			"UPDATE player_tx_mapping set status = 2, payout_tx_id = \'%s\' where tx_id = \'%s\';",
-			payout_tx_str, tx_id_str) + 1;
+		bet_sql_update_player_tx_payout(payout_tx_str, tx_id_str, 2);
 	}
-
-	if (required_size > sql_query_size) {
-		sql_query = calloc(required_size, sizeof(char));
-	} else {
-		sql_query = calloc(sql_query_size, sizeof(char));
-	}
-	if (sql_query == NULL) {
-		dlg_error("Memory allocation failed for sql_query");
-		return;
-	}
-
-	if ((response_info) && (jstr(response_info, "payout_tx"))) {
-		snprintf(sql_query, required_size,
-			"UPDATE player_tx_mapping set status = 0, payout_tx_id = \'%s\' where tx_id = \'%s\';",
-			payout_tx_str, tx_id_str);
-	} else {
-		snprintf(sql_query, required_size,
-			"UPDATE player_tx_mapping set status = 2, payout_tx_id = \'%s\' where tx_id = \'%s\';",
-			payout_tx_str, tx_id_str);
-	}
-	bet_run_query(sql_query);
-	if (sql_query)
-		free(sql_query);
 }
 
 // clang-format off
@@ -1068,12 +951,12 @@ void bet_handle_game(int argc, char **argv)
 			break;
 		cases("history")
 			cJSON *fail_info = bet_show_fail_history();
-			dlg_info(
+			DLG_JSON(info,
 				"Below hands played unsuccessfully, you can raise dispute using \'.\\bet game dispute tx_id\'::\n %s\n",
-				cJSON_Print(fail_info));
+				fail_info);
 			cJSON *success_info = bet_show_success_history();
-			dlg_info("Below hands are played successfully::\n%s\n", cJSON_Print(success_info));
-			break;	
+			DLG_JSON(info, "Below hands are played successfully::\n%s\n", success_info);
+			break;
 		cases("info")
 			int32_t opt = -1;
 			if (argc == 4) {
@@ -1082,8 +965,8 @@ void bet_handle_game(int argc, char **argv)
 				else if ((strcmp(argv[3], "fail") == 0) || (strcmp(argv[3], "1") == 0))
 					opt = 1;
 			}
-			cJSON *info = sqlite3_get_game_details(opt);
-			dlg_info("info::%s", cJSON_Print(info));
+			cJSON *game_details_info = sqlite3_get_game_details(opt);
+			DLG_JSON(info, "info::%s", game_details_info);
 			break;
 		cases("solve")
 			bet_resolve_disputed_tx();

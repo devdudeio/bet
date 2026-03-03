@@ -183,7 +183,7 @@ void bet_help_dcv_command_usage()
 	cJSON *command_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(command_info, "ip address", "ip address of the dealer");
 
-	dlg_info("\nCommand: \n"
+	DLG_JSON(info, "\nCommand: \n"
 		 "dcv\n"
 		 "\nDescription: \n"
 		 "Starts the backend dealer node \n"
@@ -194,7 +194,8 @@ void bet_help_dcv_command_usage()
 		 "A dealer node get started and informed about its availability to the cashier nodes \n"
 		 "\nExample: \n"
 		 "./bet dcv \"ip address of the dealer\" ",
-		 cJSON_Print(command_info));
+		 command_info);
+	cJSON_Delete(command_info);
 }
 
 void bet_help_player_command_usage()
@@ -215,7 +216,7 @@ void bet_help_cashier_command_usage()
 	cJSON *command_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(command_info, "ip address", "ip address of the cashier");
 
-	dlg_info(
+	DLG_JSON(info,
 		"\nCommand: \n"
 		"cashier \n"
 		"\nDescription: \n"
@@ -229,7 +230,8 @@ void bet_help_cashier_command_usage()
 		"./cashierd cashier \"ip address of the cashier\" \n"
 		"or (at the moment bet and cashier daemons contains all the functionalities while building) \n"
 		"./bet cashier \"ip address of the cashier\" \n",
-		cJSON_Print(command_info));
+		command_info);
+	cJSON_Delete(command_info);
 }
 
 void bet_help_game_command_usage()
@@ -240,7 +242,7 @@ void bet_help_game_command_usage()
 		command_info, "game_status",
 		"[fail/success] or [0/1] Retrives the games which are fully played on passing [success/1] and disconnected games on passing [fail/0] ");
 
-	dlg_info(
+	DLG_JSON(info,
 		"\nCommand: \n"
 		"game \n"
 		"\nDescription: \n"
@@ -264,7 +266,8 @@ void bet_help_game_command_usage()
 		"./bet game dispute \"disputed tx id \"  \n"
 		"Result: \n"
 		"Only the game with the disputed tx id will be resolved using DRP, provided if the game is not played and payout_tx is not happened and the notaries involved(atleast 2) are active then the payin_tx will be reversed and the CHIPS amount will be credited back to the address from which the CHIPS are spent.\n",
-		cJSON_Print(command_info));
+		command_info);
+	cJSON_Delete(command_info);
 }
 
 void bet_help_withdraw_command_usage()
@@ -296,7 +299,7 @@ void bet_help_extract_tx_data_command_usage()
 	cJSON_AddStringToObject(command_info, "tx_id",
 				"It extracts the data part of the payin_tx and display the JSON data of it");
 
-	dlg_info(
+	DLG_JSON(info,
 		"\nCommand: \n"
 		"extract_tx_data \n"
 		"\nDescription: \n"
@@ -306,7 +309,8 @@ void bet_help_extract_tx_data_command_usage()
 		"%s"
 		"\nExample: \n"
 		"./bet extract_tx_data tx_id \n",
-		cJSON_Print(command_info));
+		command_info);
+	cJSON_Delete(command_info);
 }
 
 void bet_help_scan_command_usage()
@@ -445,7 +449,7 @@ void bet_help_raise_registration_dispute_command_usage()
 	cJSON_AddStringToObject(command_info, "dealer_id", "ID of the dealer raising the dispute");
 	cJSON_AddStringToObject(command_info, "action", "Action to take: 'refund' or 'add_dealer'");
 
-	dlg_info("\nCommand: \n"
+	DLG_JSON(info, "\nCommand: \n"
 		 "raise_dispute\n"
 		 "\nDescription: \n"
 		 "Raises a dispute for a dealer registration transaction\n"
@@ -456,7 +460,8 @@ void bet_help_raise_registration_dispute_command_usage()
 		 "Creates a dispute transaction that will be processed by the block processor\n"
 		 "\nExample: \n"
 		 "./bet raise_registration_dispute \"dealer_id\" \"refund\"",
-		 cJSON_Print(command_info));
+		 command_info);
+	cJSON_Delete(command_info);
 }
 
 void bet_help_register_dealer_command_usage()
@@ -464,7 +469,7 @@ void bet_help_register_dealer_command_usage()
 	cJSON *command_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(command_info, "dealer_id", "ID of the dealer to register");
 
-	dlg_info("\nCommand: \n"
+	DLG_JSON(info, "\nCommand: \n"
 		 "register_dealer\n"
 		 "\nDescription: \n"
 		 "Registers a dealer by creating a registration transaction and storing it in the dealer's ID\n"
@@ -475,7 +480,8 @@ void bet_help_register_dealer_command_usage()
 		 "Creates a registration transaction and stores it in the dealer's ID for future reference\n"
 		 "\nExample: \n"
 		 "./bet register_dealer \"dealer_id\"",
-		 cJSON_Print(command_info));
+		 command_info);
+	cJSON_Delete(command_info);
 }
 
 void bet_help_deregister_dealer_command_usage()
@@ -483,7 +489,7 @@ void bet_help_deregister_dealer_command_usage()
 	cJSON *command_info = cJSON_CreateObject();
 	cJSON_AddStringToObject(command_info, "dealer_id", "ID of the dealer to deregister");
 
-	dlg_info("\nCommand: \n"
+	DLG_JSON(info, "\nCommand: \n"
 		 "deregister_dealer\n"
 		 "\nDescription: \n"
 		 "Deregisters a dealer by creating a deregistration transaction and storing it in the dealer's ID\n"
@@ -494,7 +500,8 @@ void bet_help_deregister_dealer_command_usage()
 		 "Creates a deregistration transaction and stores it in the dealer's ID for future reference\n"
 		 "\nExample: \n"
 		 "./bet deregister_dealer \"dealer_id\"",
-		 cJSON_Print(command_info));
+		 command_info);
+	cJSON_Delete(command_info);
 }
 
 // clang-format off

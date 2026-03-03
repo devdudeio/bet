@@ -27,17 +27,23 @@ void print_cashiers_id(char *id)
 		for (int32_t i = 0; i < all_t_b_p_keys_no; i++) {
 			cJSON *temp =
 				get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(all_t_b_p_keys[i], game_id));
-			if (temp)
-				dlg_info("%s :: %s", all_t_b_p_key_names[i], cJSON_Print(temp));
+			if (temp) {
+				char *_s = cJSON_Print(temp);
+				if (_s) { dlg_info("%s :: %s", all_t_b_p_key_names[i], _s); free(_s); }
+			}
 		}
 		cJSON *temp = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(T_GAME_INFO_KEY, game_id));
-		if (temp)
-			dlg_info("%s :: %s", T_GAME_INFO_KEY, cJSON_Print(temp));
+		if (temp) {
+			char *_s = cJSON_Print(temp);
+			if (_s) { dlg_info("%s :: %s", T_GAME_INFO_KEY, _s); free(_s); }
+		}
 
 		temp = NULL;
 		temp = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(T_CARD_BV_KEY, game_id));
-		if (temp)
-			dlg_info("%s :: %s", T_CARD_BV_KEY, cJSON_Print(temp));
+		if (temp) {
+			char *_s = cJSON_Print(temp);
+			if (_s) { dlg_info("%s :: %s", T_CARD_BV_KEY, _s); free(_s); }
+		}
 	}
 }
 
@@ -49,7 +55,7 @@ void print_dealers_id(char *id)
 	for (int32_t i = 0; i < no_of_keys; i++) {
 		cJSON *temp = get_cJSON_from_id_key_vdxfid(id, get_vdxf_id(all_ds_keys[i]));
 		if (temp)
-			dlg_info("%s", cJSON_Print(temp));
+			DLG_JSON(info, "%s", temp);
 	}
 }
 
@@ -61,7 +67,7 @@ void print_dealer_id(char *id)
 	for (int32_t i = 0; i < no_of_keys; i++) {
 		cJSON *temp = get_cJSON_from_id_key_vdxfid(id, get_vdxf_id(all_d_keys[i]));
 		if (temp)
-			dlg_info("%s", cJSON_Print(temp));
+			DLG_JSON(info, "%s", temp);
 	}
 }
 
@@ -74,20 +80,26 @@ void print_table_id(char *id)
 		dlg_info("game_id::%s", game_id);
 
 		cJSON *temp = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(T_PLAYER_INFO_KEY, game_id));
-		if (temp)
-			dlg_info("%s :: %s", T_PLAYER_INFO_KEY, cJSON_Print(temp));
+		if (temp) {
+			char *_s = cJSON_Print(temp);
+			if (_s) { dlg_info("%s :: %s", T_PLAYER_INFO_KEY, _s); free(_s); }
+		}
 
 		for (int32_t i = 0; i < all_t_d_p_keys_no; i++) {
 			cJSON *temp =
 				get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(all_t_d_p_keys[i], game_id));
-			if (temp)
-				dlg_info("%s :: %s", all_t_d_p_key_names[i], cJSON_Print(temp));
+			if (temp) {
+				char *_s = cJSON_Print(temp);
+				if (_s) { dlg_info("%s :: %s", all_t_d_p_key_names[i], _s); free(_s); }
+			}
 		}
 		for (int32_t i = 0; i < all_t_b_p_keys_no; i++) {
 			cJSON *temp =
 				get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(all_t_b_p_keys[i], game_id));
-			if (temp)
-				dlg_info("%s :: %s", all_t_b_p_key_names[i], cJSON_Print(temp));
+			if (temp) {
+				char *_s = cJSON_Print(temp);
+				if (_s) { dlg_info("%s :: %s", all_t_b_p_key_names[i], _s); free(_s); }
+			}
 		}
 		temp = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(T_GAME_INFO_KEY, game_id));
 		if (temp) {
@@ -97,8 +109,10 @@ void print_table_id(char *id)
 
 		temp = NULL;
 		temp = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(T_CARD_BV_KEY, game_id));
-		if (temp)
-			dlg_info("%s :: %s", T_CARD_BV_KEY, cJSON_Print(temp));
+		if (temp) {
+			char *_s = cJSON_Print(temp);
+			if (_s) { dlg_info("%s :: %s", T_CARD_BV_KEY, _s); free(_s); }
+		}
 	}
 }
 
@@ -110,12 +124,16 @@ void print_player_id(char *id)
 	if (game_id) {
 		cJSON *player_deck = NULL;
 		player_deck = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(PLAYER_DECK_KEY, game_id));
-		if (player_deck)
-			dlg_info("%s :: %s", PLAYER_DECK_KEY, cJSON_Print(player_deck));
+		if (player_deck) {
+			char *_s = cJSON_Print(player_deck);
+			if (_s) { dlg_info("%s :: %s", PLAYER_DECK_KEY, _s); free(_s); }
+		}
 		cJSON *game_info = NULL;
 		game_info = get_cJSON_from_id_key_vdxfid(id, get_key_data_vdxf_id(T_GAME_INFO_KEY, game_id));
-		if (game_info)
-			dlg_info("%s :: %s", T_GAME_INFO_KEY, cJSON_Print(game_info));
+		if (game_info) {
+			char *_s = cJSON_Print(game_info);
+			if (_s) { dlg_info("%s :: %s", T_GAME_INFO_KEY, _s); free(_s); }
+		}
 	}
 }
 
@@ -129,7 +147,7 @@ void print_table_key_info(int argc, char **argv)
 		if (argv[3]) {
 			dlg_info("%s::%s", game_id_str, get_key_data_vdxf_id(argv[3], game_id_str));
 			key_info = get_cJSON_from_id_key_vdxfid(argv[2], get_key_data_vdxf_id(argv[3], game_id_str));
-			dlg_info("%s", cJSON_Print(key_info));
+			DLG_JSON(info, "%s", key_info);
 		}
 	}
 }
@@ -178,7 +196,7 @@ void print_vdxf_info(int argc, char **argv)
 	    strcmp(vdxf_id, get_vdxf_id(T_PLAYER_INFO_KEY)) == 0 || strcmp(vdxf_id, get_vdxf_id(DEALERS_KEY)) == 0) {
 		json_data = get_cJSON_from_id_key_vdxfid(id, vdxf_id);
 		if (json_data) {
-			dlg_info("%s", cJSON_Print(json_data));
+			DLG_JSON(info, "%s", json_data);
 			cJSON_Delete(json_data);
 		}
 	} else if (strcmp(vdxf_id, get_vdxf_id(T_GAME_ID_KEY)) == 0) {

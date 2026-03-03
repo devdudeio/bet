@@ -78,7 +78,8 @@ char tx_ids[CARDS_MAXPLAYERS][100];
 int32_t threshold_time = 30; /* Time to send the beacon*/
 
 int32_t dcv_data_exists = 0;
-char dcv_gui_data[8196];
+char dcv_gui_data[LWS_PRE + 8196];
+int32_t dcv_gui_data_len = 0;
 int ws_dcv_connection_status = 0;
 
 double dcv_commission_percentage = 0.75;
@@ -88,6 +89,7 @@ int32_t heartbeat_on = 0;
 
 char table_id[65];
 int32_t dcv_state = 0;
+static pthread_mutex_t dcv_gui_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void bet_set_table_id()
 {
@@ -100,25 +102,24 @@ void bet_set_table_id()
 
 void bet_dcv_lws_write(cJSON *data)
 {
-	if (ws_dcv_connection_status == 1) {
-		if (dcv_data_exists == 1) {
-			dlg_info("There is more data\n");
-			while (dcv_data_exists == 1)
-				sleep(1);
-		}
-		memset(dcv_gui_data, 0, sizeof(dcv_gui_data));
-		char *json_str = cJSON_Print(data);
-		size_t len = strlen(json_str);
-		if (len >= sizeof(dcv_gui_data)) {
-			len = sizeof(dcv_gui_data) - 1;
-		}
-		memcpy(dcv_gui_data, json_str, len);
-		dcv_gui_data[len] = '\0';  // Ensure null termination
-		free(json_str);
-		dcv_data_exists = 1;
-		lws_callback_on_writable(wsi_global_host);
-		dlg_info("Data pushed to GUI\n");
-	}
+	if (ws_dcv_connection_status != 1) return;
+
+	char *json_str = cJSON_Print(data);
+	if (!json_str) return;
+	size_t len = strlen(json_str);
+	if (len >= sizeof(dcv_gui_data) - LWS_PRE)
+		len = sizeof(dcv_gui_data) - LWS_PRE - 1;
+
+	pthread_mutex_lock(&dcv_gui_mutex);
+	memset(dcv_gui_data, 0, sizeof(dcv_gui_data));
+	memcpy(dcv_gui_data + LWS_PRE, json_str, len);
+	dcv_gui_data[LWS_PRE + len] = '\0';
+	dcv_gui_data_len = len;
+	dcv_data_exists = 1;
+	pthread_mutex_unlock(&dcv_gui_mutex);
+
+	free(json_str);
+	lws_callback_on_writable(wsi_global_host);
 }
 
 void bet_chat(struct lws *wsi, cJSON *argjson)
@@ -146,9 +147,10 @@ int32_t bet_seats(struct lws *wsi, cJSON *argjson)
 	cJSON *table_info = NULL, *seats_info = NULL;
 	char *rendered = NULL;
 	int32_t retval = 0;
-	cJSON *seat[max_players];
+	cJSON *seat[CARDS_MAXPLAYERS];
+	int mp = (max_players > CARDS_MAXPLAYERS) ? CARDS_MAXPLAYERS : max_players;
 
-	for (int i = 0; i < max_players; i++) {
+	for (int i = 0; i < mp; i++) {
 		seat[i] = cJSON_CreateObject();
 	}
 
@@ -156,7 +158,7 @@ int32_t bet_seats(struct lws *wsi, cJSON *argjson)
 	initialize_seat(seat[1], "player2", 1, 0, 0, 1);
 
 	seats_info = cJSON_CreateArray();
-	for (int i = 0; i < max_players; i++) {
+	for (int i = 0; i < mp; i++) {
 		cJSON_AddItemToArray(seats_info, seat[i]);
 	}
 
@@ -165,7 +167,17 @@ int32_t bet_seats(struct lws *wsi, cJSON *argjson)
 	cJSON_AddItemToObject(table_info, "seats", seats_info);
 
 	rendered = cJSON_Print(table_info);
-	lws_write(wsi, (unsigned char *)rendered, strlen(rendered), 0);
+	if (rendered) {
+		size_t rlen = strlen(rendered);
+		unsigned char *wbuf = malloc(LWS_PRE + rlen);
+		if (wbuf) {
+			memcpy(wbuf + LWS_PRE, rendered, rlen);
+			lws_write(wsi, wbuf + LWS_PRE, rlen, LWS_WRITE_TEXT);
+			free(wbuf);
+		}
+		free(rendered);
+	}
+	cJSON_Delete(table_info);
 
 	// Nanomsg removed - no longer used
 
@@ -185,7 +197,7 @@ int32_t bet_game(struct lws *wsi, cJSON *argjson)
 	cJSON_AddItemToArray(pot_info, cJSON_CreateNumber(0));
 
 	cJSON_AddItemToObject(game_details, "pot", pot_info);
-	sprintf(buf, "Texas Holdem Poker:%d/%d", small_blind_amount, big_blind_amount);
+	snprintf(buf, sizeof(buf), "Texas Holdem Poker:%d/%d", small_blind_amount, big_blind_amount);
 
 	cJSON_AddStringToObject(game_details, "gametype", buf);
 
@@ -193,7 +205,17 @@ int32_t bet_game(struct lws *wsi, cJSON *argjson)
 	cJSON_AddStringToObject(game_info, "method", "game");
 	cJSON_AddItemToObject(game_info, "game", game_details);
 	rendered = cJSON_Print(game_info);
-	lws_write(wsi, (unsigned char *)rendered, strlen(rendered), 0);
+	if (rendered) {
+		size_t rlen = strlen(rendered);
+		unsigned char *wbuf = malloc(LWS_PRE + rlen);
+		if (wbuf) {
+			memcpy(wbuf + LWS_PRE, rendered, rlen);
+			lws_write(wsi, wbuf + LWS_PRE, rlen, LWS_WRITE_TEXT);
+			free(wbuf);
+		}
+		free(rendered);
+	}
+	cJSON_Delete(game_info);
 	return 0;
 }
 
@@ -203,6 +225,10 @@ int32_t bet_dcv_frontend(struct lws *wsi, cJSON *argjson)
 	char *rendered = NULL, *method = NULL;
 
 	method = jstr(argjson, "method");
+	if (!method) {
+		dlg_warn("Received message without method field");
+		return 1;
+	}
 	dlg_info("method::%s\n", method);
 	if (strcmp(method, "game") == 0) {
 		retval = bet_game(wsi, argjson);
@@ -214,7 +240,8 @@ int32_t bet_dcv_frontend(struct lws *wsi, cJSON *argjson)
 	} else if (strcmp(method, "reset") == 0) {
 		bet_reset_all_dcv_params(bet_dcv, dcv_vars);
 		rendered = cJSON_Print(argjson);
-		(void)rendered; /* set but not used - may be used by UI */
+		free(rendered);
+		rendered = NULL;
 		// Nanomsg removed - no longer used
 	} else if (strcmp(method, "get_bal_info") == 0) {
 		// Common wallet functionality - use deferred write pattern
@@ -243,14 +270,28 @@ int lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason, v
 
 	switch (reason) {
 	case LWS_CALLBACK_RECEIVE:
+		if (lws_buf_length + len >= sizeof(lws_buf)) {
+			dlg_error("Host WebSocket buffer overflow prevented (need %d, have %zu)",
+				  lws_buf_length + (int)len, sizeof(lws_buf));
+			memset(lws_buf, 0x00, sizeof(lws_buf));
+			lws_buf_length = 0;
+			return -1;
+		}
 		memcpy(lws_buf + lws_buf_length, in, len);
 		lws_buf_length += len;
 		if (!lws_is_final_fragment(wsi))
 			break;
 		argjson = cJSON_Parse(lws_buf);
+		if (!argjson) {
+			dlg_error("Host: invalid JSON received");
+			memset(lws_buf, 0x00, sizeof(lws_buf));
+			lws_buf_length = 0;
+			break;
+		}
 		if (bet_dcv_frontend(wsi, argjson) != 0) {
 			dlg_warn("Failed to process the host command");
 		}
+		cJSON_Delete(argjson);
 		memset(lws_buf, 0x00, sizeof(lws_buf));
 		lws_buf_length = 0;
 		break;
@@ -260,13 +301,15 @@ int lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason, v
 		ws_dcv_connection_status = 1;
 		break;
 	case LWS_CALLBACK_SERVER_WRITEABLE:
-
+		pthread_mutex_lock(&dcv_gui_mutex);
 		if (dcv_data_exists) {
-			if (strlen(dcv_gui_data) != 0) {
-				lws_write(wsi, (unsigned char *)dcv_gui_data, strlen(dcv_gui_data), 0);
+			if (dcv_gui_data_len > 0) {
+				lws_write(wsi, (unsigned char *)(dcv_gui_data + LWS_PRE), dcv_gui_data_len, LWS_WRITE_TEXT);
 				dcv_data_exists = 0;
+				dcv_gui_data_len = 0;
 			}
 		}
+		pthread_mutex_unlock(&dcv_gui_mutex);
 		break;
 	default:
 		break;
@@ -404,10 +447,11 @@ int32_t bet_dcv_start(struct privatebet_info *bet, int32_t peerid)
 cJSON *bet_get_seats_json(int32_t max_players)
 {
 	cJSON *seats_info = NULL;
-	cJSON *seat[max_players];
+	cJSON *seat[CARDS_MAXPLAYERS];
+	int mp = (max_players > CARDS_MAXPLAYERS) ? CARDS_MAXPLAYERS : max_players;
 
 	seats_info = cJSON_CreateArray();
-	for (int i = 0; i < max_players; i++) {
+	for (int i = 0; i < mp; i++) {
 		seat[i] = cJSON_CreateObject();
 		initialize_seat(seat[i], player_seats_info[i].seat_name, player_seats_info[i].seat,
 				player_seats_info[i].chips, player_seats_info[i].empty, player_seats_info[i].playing);
@@ -442,8 +486,11 @@ int32_t bet_player_join_req(cJSON *argjson, struct privatebet_info *bet, struct 
 	player_seats_info[jint(argjson, "gui_playerID")].empty = 0;
 	player_seats_info[jint(argjson, "gui_playerID")].chips =
 		vars->funds[vars->req_id_to_player_id_mapping[jint(argjson, "gui_playerID")]];
-	if (jstr(argjson, "player_name") && (strlen(jstr(argjson, "player_name")) != 0))
-		strcpy(player_seats_info[jint(argjson, "gui_playerID")].seat_name, jstr(argjson, "player_name"));
+	if (jstr(argjson, "player_name") && (strlen(jstr(argjson, "player_name")) != 0)) {
+		snprintf(player_seats_info[jint(argjson, "gui_playerID")].seat_name,
+			 sizeof(player_seats_info[jint(argjson, "gui_playerID")].seat_name),
+			 "%s", jstr(argjson, "player_name"));
+	}
 	cJSON *seats_info = NULL;
 
 	dlg_info("bet->maxplayers::%d\n", bet->maxplayers);
@@ -469,7 +516,7 @@ static int32_t bet_send_turn_info(struct privatebet_info *bet, int32_t playerid,
 	cJSON_AddNumberToObject(turn_info, "cardid", cardid);
 	cJSON_AddNumberToObject(turn_info, "card_type", card_type);
 
-	dlg_info("%s", cJSON_Print(turn_info));
+	DLG_JSON(info, "%s", turn_info);
 	// Nanomsg removed - no longer used
 	retval = OK;
 	return retval;
@@ -563,7 +610,7 @@ static int32_t bet_check_bvv_ready(struct privatebet_info *bet)
 	for (int i = 0; i < bet->maxplayers; i++) {
 		jaddistr(uri_info, (char *)dcv_info.uri[i]);
 	}
-	dlg_info("%s\n", cJSON_Print(bvv_ready));
+	DLG_JSON(info, "%s\n", bvv_ready);
 // Nanomsg removed - no longer used
 	return retval;
 }
@@ -579,12 +626,12 @@ static int32_t bet_create_invoice(cJSON *argjson, struct privatebet_info *bet, s
 	bet_alloc_args(argc, &argv);
 	dcv_info.betamount += jint(argjson, "betAmount");
 
-	strcpy(argv[0], "lightning-cli");
-	strcpy(argv[1], "invoice");
-	sprintf(argv[2], "%ld", (long int)jint(argjson, "betAmount")); //sg777 mchips_msatoshichips
-	sprintf(argv[3], "%s_%d_%d_%d_%d", bits256_str(hexstr, dcv_info.deckid), invoiceID, jint(argjson, "playerID"),
+	snprintf(argv[0], arg_size, "%s", "lightning-cli");
+	snprintf(argv[1], arg_size, "%s", "invoice");
+	snprintf(argv[2], arg_size, "%ld", (long int)jint(argjson, "betAmount")); //sg777 mchips_msatoshichips
+	snprintf(argv[3], arg_size, "%s_%d_%d_%d_%d", bits256_str(hexstr, dcv_info.deckid), invoiceID, jint(argjson, "playerID"),
 		jint(argjson, "round"), jint(argjson, "betAmount"));
-	sprintf(argv[4], "\"Invoice_details_playerID:%d,round:%d,betting Amount:%d\"", jint(argjson, "playerID"),
+	snprintf(argv[4], arg_size, "\"Invoice_details_playerID:%d,round:%d,betting Amount:%d\"", jint(argjson, "playerID"),
 		jint(argjson, "round"), jint(argjson, "betAmount"));
 
 	invoice = cJSON_CreateObject();
@@ -596,7 +643,9 @@ static int32_t bet_create_invoice(cJSON *argjson, struct privatebet_info *bet, s
 		cJSON_AddNumberToObject(invoice_info, "playerID", jint(argjson, "playerID"));
 		cJSON_AddNumberToObject(invoice_info, "round", jint(argjson, "round"));
 		cJSON_AddStringToObject(invoice_info, "label", argv[3]);
-		cJSON_AddStringToObject(invoice_info, "invoice", cJSON_Print(invoice));
+		char *_invoice_str = cJSON_Print(invoice);
+		cJSON_AddStringToObject(invoice_info, "invoice", _invoice_str ? _invoice_str : "");
+		free(_invoice_str);
 		// Nanomsg removed - no longer used
 		retval = OK;
 	} else {
@@ -617,12 +666,12 @@ static int32_t bet_create_betting_invoice(cJSON *argjson, struct privatebet_info
 	bet_alloc_args(argc, &argv);
 	dcv_info.betamount += jint(argjson, "betAmount");
 
-	strcpy(argv[0], "lightning-cli");
-	strcpy(argv[1], "invoice");
-	sprintf(argv[2], "%ld", (long int)jint(argjson, "invoice_amount") * mchips_msatoshichips);
-	sprintf(argv[3], "%s_%d_%d_%d_%d", bits256_str(hexstr, dcv_info.deckid), invoiceID, jint(argjson, "playerID"),
+	snprintf(argv[0], arg_size, "%s", "lightning-cli");
+	snprintf(argv[1], arg_size, "%s", "invoice");
+	snprintf(argv[2], arg_size, "%ld", (long int)jint(argjson, "invoice_amount") * mchips_msatoshichips);
+	snprintf(argv[3], arg_size, "%s_%d_%d_%d_%d", bits256_str(hexstr, dcv_info.deckid), invoiceID, jint(argjson, "playerID"),
 		jint(argjson, "round"), jint(argjson, "invoice_amount"));
-	sprintf(argv[4], "\"Invoice_details_playerID:%d,round:%d,betting Amount:%d\"", jint(argjson, "playerID"),
+	snprintf(argv[4], arg_size, "\"Invoice_details_playerID:%d,round:%d,betting Amount:%d\"", jint(argjson, "playerID"),
 		jint(argjson, "round"), jint(argjson, "invoice_amount"));
 
 	invoice = cJSON_CreateObject();
@@ -633,7 +682,9 @@ static int32_t bet_create_betting_invoice(cJSON *argjson, struct privatebet_info
 		cJSON_AddNumberToObject(invoice_info, "playerID", jint(argjson, "playerID"));
 		cJSON_AddNumberToObject(invoice_info, "round", jint(argjson, "round"));
 		cJSON_AddStringToObject(invoice_info, "label", argv[3]);
-		cJSON_AddStringToObject(invoice_info, "invoice", cJSON_Print(invoice));
+		char *_invoice_str = cJSON_Print(invoice);
+		cJSON_AddStringToObject(invoice_info, "invoice", _invoice_str ? _invoice_str : "");
+		free(_invoice_str);
 		cJSON_AddItemToObject(invoice_info, "actionResponse", cJSON_GetObjectItem(argjson, "actionResponse"));
 		// Nanomsg removed - no longer used
 		retval = OK;
@@ -822,6 +873,16 @@ void bet_reset_all_dcv_params(struct privatebet_info *bet, struct privatebet_var
 	}
 	no_of_rand_str = 0;
 	dcv_state = 0;
+
+	/* Reset signing state and per-player arrays from previous game */
+	no_of_signers = 0;
+	for (int i = 0; i < CARDS_MAXPLAYERS; i++) {
+		is_signed[i] = 0;
+		eval_game_p[i] = 0;
+		eval_game_c[i] = 0;
+		memset(player_chips_address[i], 0, sizeof(player_chips_address[i]));
+	}
+
 	bet_set_table_id();
 	bet_init_player_seats_info();
 }
@@ -874,19 +935,9 @@ void bet_game_info(struct privatebet_info *bet, struct privatebet_vars *vars)
 		}
 	}
 
-	int argc = 3;
-	char **argv = NULL;
-	char *sql_query = calloc(sql_query_size, sizeof(char));
-	bet_alloc_args(argc, &argv);
-	strcpy(argv[0], "dcv_game_state");
-	sprintf(argv[1], "\'%s\'", table_id);
-	sprintf(argv[2], "\'%s\'", cJSON_Print(game_state));
-
-	bet_make_insert_query(argc, argv, &sql_query);
-	bet_run_query(sql_query);
-	bet_dealloc_args(argc, &argv);
-	if (sql_query)
-		free(sql_query);
+	char *_gs_str = cJSON_Print(game_state);
+	bet_sql_insert_game_state("dcv_game_state", table_id, _gs_str ? _gs_str : "");
+	free(_gs_str);
 
 	// Nanomsg removed - no longer used
 }
@@ -1001,13 +1052,15 @@ static int32_t bet_dcv_poker_winner(struct privatebet_info *bet, struct privateb
 	}
 	data_info = payout_tx_data_info(bet, vars);
 	hex_str = calloc(tx_data_size * 2, sizeof(char));
-	str_to_hexstr(cJSON_Print(data_info), hex_str);
+	char *_di_str = cJSON_Print(data_info);
+	str_to_hexstr(_di_str, hex_str);
+	free(_di_str);
 
 	payout_tx_info = chips_create_payout_tx(payout_info, no_of_txs, tx_ids, hex_str);
 	if (hex_str)
 		free(hex_str);
 
-	dlg_info("payout_tx_info::%s\n", cJSON_Print(payout_tx_info));
+	DLG_JSON(info, "payout_tx_info::%s\n", payout_tx_info);
 	if (payout_tx_info == NULL) {
 		retval = ERR_PAYOUT_TX;
 		return retval;
@@ -1169,7 +1222,7 @@ int32_t bet_evaluate_hand(struct privatebet_info *bet, struct privatebet_vars *v
 	cJSON_AddItemToObject(final_info, "winningAmounts", winningAmounts);
 	cJSON_AddItemToObject(final_info, "settleAmounts", settleAmounts);
 
-	dlg_info("Final Info :: %s\n", cJSON_Print(final_info));
+	DLG_JSON(info, "Final Info :: %s\n", final_info);
 
 	// Nanomsg removed - no longer used
 	retval = OK;
@@ -1178,8 +1231,17 @@ int32_t bet_evaluate_hand(struct privatebet_info *bet, struct privatebet_vars *v
 
 	sleep(5);
 	if (wsi_global_host) {
-		lws_write(wsi_global_host, (unsigned char *)cJSON_Print(final_info), strlen(cJSON_Print(final_info)),
-			  0);
+		char *json_str = cJSON_Print(final_info);
+		if (json_str) {
+			size_t json_len = strlen(json_str);
+			unsigned char *buf = malloc(LWS_PRE + json_len);
+			if (buf) {
+				memcpy(buf + LWS_PRE, json_str, json_len);
+				lws_write(wsi_global_host, buf + LWS_PRE, json_len, LWS_WRITE_TEXT);
+				free(buf);
+			}
+			free(json_str);
+		}
 	}
 
 	// Reset the params and continue the next hand automatically
@@ -1298,16 +1360,19 @@ static int32_t bet_dcv_verify_tx(cJSON *argjson, struct privatebet_info *bet)
 	if (tx_info == NULL)
 		return ERR_CHIPS_INVALID_TX;
 
-	dlg_info("%s", cJSON_Print(argjson));
+	DLG_JSON(info, "%s", argjson);
 
 	block_height = jint(argjson, "block_height");
 	while (chips_get_block_count() < block_height) {
 		sleep(1);
 	}
 
-	if (chips_check_if_tx_unspent(cJSON_Print(tx_info)) == 1) {
+	char *_txinfo_str = cJSON_Print(tx_info);
+	if (chips_check_if_tx_unspent(_txinfo_str) == 1) {
 		hex_data = calloc(tx_data_size * 2, sizeof(char));
-		retval = chips_extract_data(cJSON_Print(tx_info), &hex_data);
+		retval = chips_extract_data(_txinfo_str, &hex_data);
+		free(_txinfo_str);
+		_txinfo_str = NULL;
 		if (retval != OK)
 			goto end;
 		data = calloc(tx_data_size, sizeof(char));
@@ -1321,7 +1386,9 @@ static int32_t bet_dcv_verify_tx(cJSON *argjson, struct privatebet_info *bet)
 					bet_send_tx_reverse_rqst(argjson, bet);
 					retval = ERR_DEALER_TABLE_FULL;
 				} else {
-					strcpy(tx_ids[no_of_txs++], unstringify(cJSON_Print(tx_info)));
+					char *_tx_str = cJSON_Print(tx_info);
+					snprintf(tx_ids[no_of_txs++], sizeof(tx_ids[0]), "%s", unstringify(_tx_str));
+					free(_tx_str);
 					if (no_of_txs == bet_dcv->maxplayers)
 						dcv_state = dealer_table_full;
 				}
@@ -1330,6 +1397,8 @@ static int32_t bet_dcv_verify_tx(cJSON *argjson, struct privatebet_info *bet)
 		}
 	}
 end:
+	if (_txinfo_str)
+		free(_txinfo_str);
 	if (data)
 		free(data);
 	if (hex_data)
@@ -1355,8 +1424,9 @@ static int32_t bet_dcv_check_pos_status(cJSON *argjson, struct privatebet_info *
 	cJSON *join_res = NULL;
 
 	gui_playerID = jint(argjson, "gui_playerID");
-	if ((gui_playerID < 0) && (gui_playerID >= bet->maxplayers)) {
+	if ((gui_playerID < 0) || (gui_playerID >= bet->maxplayers)) {
 		retval = ERR_INVALID_POS;
+		return retval;
 	}
 	dlg_info("%d", player_seats_info[gui_playerID].empty);
 	*pos_status =
@@ -1385,7 +1455,7 @@ static int32_t bet_dcv_process_join_req(cJSON *argjson, struct privatebet_info *
 		dlg_info("%d", retval);
 		return retval;
 	}
-	dlg_info("%s", cJSON_Print(argjson));
+	DLG_JSON(info, "%s", argjson);
 	if (bet->numplayers < bet->maxplayers) {
 		char *req_id = jstr(argjson, "req_identifier");
 		for (int32_t i = 0; i < no_of_rand_str; i++) {
@@ -1419,7 +1489,7 @@ static int32_t bet_dcv_process_join_req(cJSON *argjson, struct privatebet_info *
 				cJSON_AddItemToArray(stakes, cJSON_CreateNumber(vars->funds[i]));
 			}
 			cJSON_AddItemToObject(stakes_info, "stakes", stakes);
-			dlg_info("%s", cJSON_Print(stakes_info));
+			DLG_JSON(info, "%s", stakes_info);
 			// Nanomsg removed - no longer used
 			retval = OK;
 
@@ -1435,15 +1505,15 @@ static int32_t bet_dcv_process_tx(cJSON *argjson, struct privatebet_info *bet, s
 {
 	int32_t retval = OK;
 	double payin_tx_amount;
-	char *sql_stmt = NULL, *rand_str = NULL;
+	char *rand_str = NULL;
 	cJSON *msig_addr_nodes = NULL, *tx_status = NULL;
 
 	retval = (dcv_state == 1) ? ERR_DEALER_TABLE_FULL : bet_dcv_verify_tx(argjson, bet);
 	if (retval != OK)
 		return retval;
 
-	strcpy(vars->player_chips_addrs[no_of_rand_str], jstr(argjson, "chips_addr"));
-	strcpy(tx_rand_str[no_of_rand_str++], jstr(argjson, "id"));
+	snprintf(vars->player_chips_addrs[no_of_rand_str], sizeof(vars->player_chips_addrs[0]), "%s", jstr(argjson, "chips_addr"));
+	snprintf(tx_rand_str[no_of_rand_str++], sizeof(tx_rand_str[0]), "%s", jstr(argjson, "id"));
 
 	payin_tx_amount = chips_get_balance_on_address_from_tx(addr, jstr(argjson, "tx_info"));
 	rand_str = jstr(argjson, "id");
@@ -1455,8 +1525,6 @@ static int32_t bet_dcv_process_tx(cJSON *argjson, struct privatebet_info *bet, s
 			vars->winners[i] = 0;
 		}
 	}
-	sql_stmt = calloc(sql_query_size, sizeof(char));
-
 	msig_addr_nodes = cJSON_CreateArray();
 	for (int32_t i = 0; i < no_of_notaries; i++) {
 		if (notary_status[i] == 1) {
@@ -1464,10 +1532,10 @@ static int32_t bet_dcv_process_tx(cJSON *argjson, struct privatebet_info *bet, s
 		}
 	}
 
-	sprintf(sql_stmt, "INSERT INTO dcv_tx_mapping values(\'%s\',\'%s\',\'%s\',\'%s\',%d,%d);",
-		jstr(argjson, "tx_info"), table_id, rand_str, cJSON_Print(msig_addr_nodes), tx_unspent,
-		threshold_value);
-	retval = bet_run_query(sql_stmt);
+	char *_msig_str = cJSON_Print(msig_addr_nodes);
+	retval = bet_sql_insert_dcv_tx(jstr(argjson, "tx_info"), table_id, rand_str,
+		_msig_str ? _msig_str : "", tx_unspent, threshold_value);
+	free(_msig_str);
 
 	tx_status = cJSON_CreateObject();
 	cJSON_AddStringToObject(tx_status, "method", "tx_status");
@@ -1477,8 +1545,6 @@ static int32_t bet_dcv_process_tx(cJSON *argjson, struct privatebet_info *bet, s
 
 	// Nanomsg removed - no longer used
 	retval = OK;
-	if (sql_stmt)
-		free(sql_stmt);
 	return retval;
 }
 
@@ -1626,7 +1692,7 @@ void bet_dcv_backend_thrd(void *_ptr)
 		} else if (strcmp(method, "player_error") == 0) {
 			retval = bet_handle_player_errs_by_dealer(argjson, bet);
 		} else {
-			dlg_warn("unknown method :: %s", cJSON_Print(argjson));
+			DLG_JSON(warn, "unknown method :: %s", argjson);
 			// Nanomsg removed - no longer used
 			retval = OK;
 		}

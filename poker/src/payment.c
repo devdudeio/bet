@@ -87,21 +87,30 @@ int32_t bet_player_log_bet_info(cJSON *argjson, struct privatebet_info *bet, int
 	cJSON_AddStringToObject(bet_info, "tx_type", "game_info");
 
 	hex_data = calloc(tx_data_size * 2, sizeof(char));
-	str_to_hexstr(cJSON_Print(bet_info), hex_data);
-	tx_id = cJSON_CreateObject();
+	char *bet_info_str = cJSON_Print(bet_info);
+	if (bet_info_str) {
+		str_to_hexstr(bet_info_str, hex_data);
+		free(bet_info_str);
+	}
 	tx_id = chips_transfer_funds_with_data(0.0, legacy_m_of_n_msig_addr, hex_data);
 
 	dlg_info("Address at which we are recording the game moves::%s", legacy_m_of_n_msig_addr);
 	if (tx_id == NULL) {
 		retval = ERR_GAME_RECORD_TX;
 	} else {
-		retval = bet_store_game_info_details(cJSON_Print(tx_id), table_id);
-		dlg_info("tx to record the game move info::%s", cJSON_Print(tx_id));
+		char *tx_id_str = cJSON_Print(tx_id);
+		if (tx_id_str) {
+			retval = bet_store_game_info_details(tx_id_str, table_id);
+			dlg_info("tx to record the game move info::%s", tx_id_str);
+			free(tx_id_str);
+		}
 	}
 
 	if (retval != OK) {
 		dlg_error("%s", bet_err_str(retval));
 	}
+	free(hex_data);
+	cJSON_Delete(bet_info);
 	return retval;
 }
 

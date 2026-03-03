@@ -61,8 +61,7 @@ char *bet_get_etho_ip()
 
 char *bet_tcp_sock_address(int32_t bindflag, char *str, char *ipaddr, uint16_t port)
 {
-	sprintf(str, "tcp://%s:%u", bindflag == 0 ? ipaddr : "*",
-		port); // ws is worse
+	snprintf(str, 128, "tcp://%s:%u", bindflag == 0 ? ipaddr : "*", port);
 	return (str);
 }
 

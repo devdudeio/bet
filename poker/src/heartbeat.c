@@ -21,7 +21,7 @@ void bet_dcv_publish_player_active_info(struct privatebet_info *bet)
 {
 	cJSON *active_info = NULL;
 	cJSON *players_status_info = NULL;
-	int bytes, active_players = 0;
+	int active_players = 0;
 	cJSON *argjson = NULL;
 	struct privatebet_vars *vars = dcv_vars;
 
@@ -43,39 +43,21 @@ void bet_dcv_publish_player_active_info(struct privatebet_info *bet)
 		cJSON_AddNumberToObject(argjson, "pot", vars->pot);
 		cJSON_AddNumberToObject(argjson, "min_amount", 0);
 		cJSON_AddStringToObject(argjson, "action", "fold");
-// Nanomsg removed - no longer used
-		if (bytes < 0) {
-// Nanomsg removed - no longer used
-		}
 		bet_dcv_round_betting_response(argjson, bet, vars);
 	}
 	if (active_players < bet->maxplayers) {
-		dlg_info("Players disconnect info::%s", cJSON_Print(players_status_info));
+		DLG_JSON(info, "Players disconnect info::%s", players_status_info);
 	}
 	cJSON_AddItemToObject(active_info, "player_status", players_status_info);
-
-// Nanomsg removed - no longer used
-	if (bytes < 0) {
-// Nanomsg removed - no longer used
-	}
 }
 
 void bet_dcv_heartbeat_loop(void *_ptr)
 {
-	cJSON *live_info = NULL;
-	int32_t bytes;
 	struct privatebet_info *bet = _ptr;
-
-	live_info = cJSON_CreateObject();
-	cJSON_AddStringToObject(live_info, "method", "is_player_active");
 
 	while (1) {
 		if (heartbeat_on == 1) {
 			bet_dcv_reset_player_status(bet);
-// Nanomsg removed - no longer used
-			if (bytes < 0) {
-// Nanomsg removed - no longer used
-			}
 			sleep(5);
 			bet_dcv_publish_player_active_info(bet);
 		}
@@ -87,7 +69,8 @@ void bet_dcv_update_player_status(cJSON *argjson)
 	int32_t playerid;
 
 	playerid = jint(argjson, "playerid");
-	player_status[playerid] = 1;
+	if (playerid >= 0 && playerid < CARDS_MAXPLAYERS)
+		player_status[playerid] = 1;
 }
 
 void bet_dcv_heartbeat_thread(struct privatebet_info *bet)

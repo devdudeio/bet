@@ -291,6 +291,16 @@ int32_t bet_dcv_round_betting_response(cJSON *argjson, struct privatebet_info *b
 	bet_amount = jint(argjson, "invoice_amount");
 	min_amount = jint(argjson, "min_amount");
 
+	if (bet_amount < 0) {
+		dlg_error("Rejecting negative bet amount: %d", bet_amount);
+		return ERR_INVALID_POS;
+	}
+
+	if (playerid < 0 || playerid >= bet->maxplayers || round < 0 || round >= CARDS_MAXROUNDS) {
+		dlg_error("Invalid playerid(%d) or round(%d) in betting response", playerid, round);
+		return ERR_INVALID_POS;
+	}
+
 	vars->betamount[playerid][round] += bet_amount;
 	vars->pot += bet_amount;
 	vars->funds[playerid] -= bet_amount;
@@ -492,9 +502,9 @@ int32_t bet_display_current_state(cJSON *argjson, struct privatebet_info *bet, s
 			} else if (vars->bet_actions[i][j] == big_blind) {
 				dlg_info("big blind ");
 			} else if (vars->bet_actions[i][j] == check) {
-				dlg_info("raise ");
-			} else if (vars->bet_actions[i][j] == raise) {
 				dlg_info("check ");
+			} else if (vars->bet_actions[i][j] == raise) {
+				dlg_info("raise ");
 			} else if (vars->bet_actions[i][j] == call) {
 				dlg_info("call ");
 			} else if (vars->bet_actions[i][j] == fold) {
@@ -696,7 +706,7 @@ int32_t bet_player_round_betting(cJSON *argjson, struct privatebet_info *bet, st
 	if (retval != OK) {
 		dlg_error("%s", bet_err_str(retval));
 	}
-	dlg_info("action response :: %s\n", cJSON_Print(action_response));
+	DLG_JSON(info, "action response :: %s\n", action_response);
 	// Nanomsg removed - no longer used
 	retval = OK;
 	return retval;

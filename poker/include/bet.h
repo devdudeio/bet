@@ -44,6 +44,12 @@
 
 // Nanomsg/nano sockets support completely removed - no longer used
 
+// Helper macro to safely log cJSON objects without leaking cJSON_Print memory
+#define DLG_JSON(level, fmt, obj) do { \
+	char *_json_str = cJSON_Print(obj); \
+	if (_json_str) { dlg_##level(fmt, _json_str); free(_json_str); } \
+} while(0)
+
 #include "common.h"
 #include "vdxf.h"
 enum action_type { small_blind = 1, big_blind, check, raise, call, allin, fold };
@@ -256,6 +262,7 @@ extern int32_t heartbeat_on;
 extern char blockchain_cli[1024];
 extern char *chips_cli;
 extern char *verus_chips_cli;
+extern char *verus_testnet_cli;
 
 struct float_num {
 	uint32_t mantisa : 23;
@@ -264,8 +271,8 @@ struct float_num {
 };
 
 struct verus_player_config {
-	char dealer_id[16];
-	char table_id[16];
+	char dealer_id[64];
+	char table_id[64];
 	char wallet_addr[64];
 	char txid[128];
 	char verus_pid[128];

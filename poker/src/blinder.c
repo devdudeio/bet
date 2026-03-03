@@ -29,6 +29,11 @@ int32_t cashier_sb_deck(char *id, bits256 *d_blinded_deck, int32_t player_id)
 	char str[65], *game_id_str = NULL;
 	cJSON *b_blinded_deck = NULL;
 
+	if (player_id < 0 || player_id >= CARDS_MAXPLAYERS) {
+		dlg_error("Invalid player_id %d in cashier_sb_deck", player_id);
+		return ERR_PLAYER_NOT_EXISTS;
+	}
+
 	game_id_str = poker_get_key_str(id, T_GAME_ID_KEY);
 	for (int32_t i = 0; i < CARDS_MAXCARDS; i++) {
 		dlg_info("%s", bits256_str(str, d_blinded_deck[i]));
@@ -116,6 +121,10 @@ int32_t reveal_bv(char *table_id)
 	cJSON *bv_info = NULL, *game_state_info = NULL, *t_player_info = NULL, *out = NULL, *card_bv = NULL;
 
 	game_state_info = get_game_state_info(table_id);
+	if (!game_state_info) {
+		dlg_error("Cannot reveal BV - game_state_info is NULL");
+		return ERR_GAME_STATE_UPDATE;
+	}
 	player_id = jint(game_state_info, "player_id");
 	card_id = jint(game_state_info, "card_id");
 
@@ -278,13 +287,11 @@ static int32_t cashier_process_settlement(char *table_id)
 		return ERR_GAME_STATE_UPDATE;
 	}
 	
-	dlg_info("Settlement complete - updating cashier game state");
-	
-	// Ensure cashier's game_id is set before updating game state
-	ensure_cashier_game_id_initialized(table_id);
-	
-	// Update cashier's game state to complete (use short name for identity functions)
-	append_game_state(bet_get_cashier_short_name(), G_SETTLEMENT_COMPLETE, NULL);
+	dlg_info("Settlement complete - updating game state on table ID");
+
+	// Write G_SETTLEMENT_COMPLETE to table ID so dealer and all nodes see it
+	// (table_id already has T_GAME_ID_KEY set by dealer, so append_game_state works)
+	append_game_state(table_id, G_SETTLEMENT_COMPLETE, NULL);
 	
 	cJSON_Delete(updated_settlement);
 	return retval;
@@ -293,16 +300,19 @@ static int32_t cashier_process_settlement(char *table_id)
 // Ensure cashier's ID has T_GAME_ID_KEY set (required for append_game_state to work)
 static int32_t ensure_cashier_game_id_initialized(char *table_id)
 {
-	static bool initialized = false;
-	if (initialized) return OK;
-	
+	static char last_game_id[65] = {0};
+
 	// Get game_id from the table
 	char *game_id_str = poker_get_key_str(table_id, T_GAME_ID_KEY);
 	if (!game_id_str) {
 		dlg_error("Cannot initialize cashier game_id - table has no game_id");
 		return ERR_GAME_ID_NOT_FOUND;
 	}
-	
+
+	// Skip if already initialized for this game
+	if (last_game_id[0] != '\0' && strcmp(last_game_id, game_id_str) == 0)
+		return OK;
+
 	// Set T_GAME_ID_KEY on the cashier's ID (use short name for update_cmm)
 	dlg_info("Initializing cashier's T_GAME_ID_KEY: %s", game_id_str);
 	cJSON *out = poker_append_key_hex((char *)bet_get_cashier_short_name(), T_GAME_ID_KEY, game_id_str, false);
@@ -310,8 +320,8 @@ static int32_t ensure_cashier_game_id_initialized(char *table_id)
 		dlg_error("Failed to set game_id on cashier's ID");
 		return ERR_GAME_STATE_UPDATE;
 	}
-	
-	initialized = true;
+
+	snprintf(last_game_id, sizeof(last_game_id), "%s", game_id_str);
 	dlg_info("Cashier game_id initialized successfully");
 	return OK;
 }

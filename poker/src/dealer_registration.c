@@ -44,7 +44,7 @@ static int32_t add_dealer_to_list(char *dealer_id)
 	if (!out) {
 		return ERR_UPDATEIDENTITY;
 	}
-	dlg_info("%s", cJSON_Print(out));
+	DLG_JSON(info, "%s", out);
 
 	return retval;
 }
@@ -355,7 +355,6 @@ void process_dealer_registration_block(char *blockhash)
 	}
 
 	// Get block information
-	blockjson = cJSON_CreateObject();
 	blockjson = chips_get_block_from_block_hash(blockhash);
 	if (blockjson == NULL) {
 		dlg_error("Failed to get block info from blockhash");
@@ -370,8 +369,7 @@ void process_dealer_registration_block(char *blockhash)
 	dlg_info("Processing block height = %d for dealer registrations", blockcount);
 
 	// Get all UTXOs for the dealers ID in this block
-	cJSON *utxos = cJSON_CreateObject();
-	utxos = getaddressutxos(verus_addr, 1);
+	cJSON *utxos = getaddressutxos(verus_addr, 1);
 
 	for (int32_t i = 0; i < cJSON_GetArraySize(utxos); i++) {
 		cJSON *utxo = cJSON_GetArrayItem(utxos, i);
@@ -419,8 +417,7 @@ void process_dealer_registration_block(char *blockhash)
 					if (!refund_tx) {
 						dlg_error("Failed to refund invalid registration fee to %s", dealer_id);
 					} else {
-						dlg_info("Refunded invalid registration fee to %s, tx: %s", dealer_id,
-							 cJSON_Print(refund_tx));
+						DLG_JSON(info, "Refunded invalid registration fee, tx: %s", refund_tx);
 					}
 					cJSON_Delete(refund_data);
 					continue;
@@ -444,8 +441,7 @@ void process_dealer_registration_block(char *blockhash)
 					if (!refund_tx) {
 						dlg_error("Failed to refund registration fee to %s", dealer_id);
 					} else {
-						dlg_info("Refunded registration fee to %s, tx: %s", dealer_id,
-							 cJSON_Print(refund_tx));
+						DLG_JSON(info, "Refunded registration fee, tx: %s", refund_tx);
 					}
 					cJSON_Delete(refund_data);
 				} else {

@@ -18,6 +18,10 @@
 extern int32_t g_start_block;
 struct p_deck_info_struct p_deck_info;
 
+// Current betting context for GUI handler (set by player_handle_betting, read by client.c)
+char g_gui_betting_action[32] = {0};  // "small_blind", "big_blind", "round_betting"
+double g_gui_betting_min_amount = 0.0;
+
 // Card names for display
 static const char *card_names[52] = {
 	"2♣", "3♣", "4♣", "5♣", "6♣", "7♣", "8♣", "9♣", "10♣", "J♣", "Q♣", "K♣", "A♣",
@@ -93,18 +97,26 @@ int32_t player_init_deck()
 	dlg_info("Updating %s key...", T_GAME_ID_KEY);
 	cJSON *out = poker_append_key_hex(player_config.verus_pid, T_GAME_ID_KEY,
 					     bits256_str(str, p_deck_info.game_id), false);
+	if (!out) {
+		dlg_error("Failed to update %s key after retries", T_GAME_ID_KEY);
+		return ERR_GAME_STATE_UPDATE;
+	}
 
 	dlg_info("Updating %s key...", PLAYER_DECK_KEY);
 	out = poker_append_key_json(
 		player_config.verus_pid, get_key_data_vdxf_id(PLAYER_DECK_KEY, bits256_str(str, p_deck_info.game_id)),
 		player_deck, true);
-	dlg_info("%s", cJSON_Print(out));
+	if (!out) {
+		dlg_error("Failed to update %s key after retries", PLAYER_DECK_KEY);
+		return ERR_GAME_STATE_UPDATE;
+	}
+	DLG_JSON(info, "%s", out);
 
 	dlg_info("Updating player game state to player_id...");
 	out = append_game_state(player_config.verus_pid, G_DECK_SHUFFLING_P, NULL);
 	if (!out)
 		return ERR_GAME_STATE_UPDATE;
-	dlg_info("%s", cJSON_Print(out));
+	DLG_JSON(info, "%s", out);
 
 	return OK;
 }
@@ -138,6 +150,28 @@ static bool is_community_card(int32_t card_type)
 {
 	return (card_type == flop_card_1 || card_type == flop_card_2 || card_type == flop_card_3 ||
 		card_type == turn_card || card_type == river_card);
+}
+
+// Map raw card_id (from deal_next_card) to local hand position (0-6).
+// This is needed because card_ids are interleaved across players and can exceed hand_size.
+// Hand positions: 0=hole1, 1=hole2, 2=flop1, 3=flop2, 4=flop3, 5=turn, 6=river
+static int32_t card_id_to_hand_index(int32_t card_id, int32_t player_id, int32_t nplayers, int32_t card_type)
+{
+	if (card_type == hole_card) {
+		// Hole cards: first hole card dealt to this player → 0, second → 1
+		// card_id for first hole = player_id, second = nplayers + player_id
+		if (nplayers > 0 && card_id == player_id)
+			return 0;
+		else if (nplayers > 0 && card_id == nplayers + player_id)
+			return 1;
+		return -1; // Not this player's hole card
+	}
+	if (card_type == flop_card_1) return 2;
+	if (card_type == flop_card_2) return 3;
+	if (card_type == flop_card_3) return 4;
+	if (card_type == turn_card)   return 5;
+	if (card_type == river_card)  return 6;
+	return -1;
 }
 
 // Report decoded card to player's identity (for dealer verification of community cards)
@@ -180,10 +214,13 @@ int32_t reveal_card(char *table_id)
 	card_type = jint(game_state_info, "card_type");
 
 	if ((player_id == p_deck_info.player_id) || (player_id == -1)) {
+		// Map raw card_id to hand position (0-6)
+		int32_t hand_idx = card_id_to_hand_index(card_id, p_deck_info.player_id, num_of_players, card_type);
+
 		// Check if we already decoded this card (from local state)
-		if (card_id < hand_size && p_local_state.decoded_cards[card_id] >= 0) {
-			dlg_info("Card %d already decoded from local state: value=%d", 
-				card_id, p_local_state.decoded_cards[card_id]);
+		if (hand_idx >= 0 && p_local_state.decoded_cards[hand_idx] >= 0) {
+			dlg_info("Card %d (hand_idx=%d) already decoded from local state: value=%d",
+				card_id, hand_idx, p_local_state.decoded_cards[hand_idx]);
 			return OK;
 		}
 
@@ -215,16 +252,21 @@ int32_t reveal_card(char *table_id)
 				if (existing_value >= 0) {
 					dlg_info("Board card already revealed on table: type=%d, value=%d",
 						card_type, existing_value);
-					// Save to local state
-					if (card_id < hand_size) {
-						update_player_decoded_card(card_id, existing_value);
+					// Save to local state using hand position
+					if (hand_idx >= 0) {
+						update_player_decoded_card(hand_idx, existing_value);
 					}
 					return OK;
 				}
 			}
 		}
 
+		int bv_attempts = 0;
 		while (1) {
+			if (++bv_attempts > 100) {
+				dlg_error("Timed out waiting for BV info after %d attempts", bv_attempts);
+				return ERR_BV_UPDATE;
+			}
 			bv_info = get_cJSON_from_id_key_vdxfid_from_height(table_id,
 							       get_key_data_vdxf_id(T_CARD_BV_KEY, game_id_str), g_start_block);
 			if (!bv_info) {
@@ -232,16 +274,22 @@ int32_t reveal_card(char *table_id)
 				wait_for_a_blocktime();
 				continue;
 			}
-			dlg_info("%s", cJSON_Print(bv_info));
+			DLG_JSON(info, "%s", bv_info);
 
 			bv = jobj(bv_info, "bv");
 			if (!bv) {
-				// TODO:: This needs to be handled
-				dlg_error("BV is missing");
+				dlg_error("BV is missing from bv_info - cashier may not have provided blinding values");
+				cJSON_Delete(bv_info);
+				return ERR_BV_UPDATE;
 			}
-			dlg_info("%s", cJSON_Print(bv));
+			DLG_JSON(info, "%s", bv);
 			if ((jint(bv_info, "card_id") == card_id) && (jint(bv_info, "player_id") == player_id))
 				break;
+			dlg_info("BV is for different card (got card_id=%d player_id=%d, want card_id=%d player_id=%d) - waiting...",
+				jint(bv_info, "card_id"), jint(bv_info, "player_id"), card_id, player_id);
+			cJSON_Delete(bv_info);
+			bv_info = NULL;
+			wait_for_a_blocktime();
 		}
 
 		b_blinded_deck = get_cJSON_from_id_key_vdxfid_from_height(table_id, get_key_data_vdxf_id(all_t_b_p_keys[player_id],
@@ -256,11 +304,15 @@ int32_t reveal_card(char *table_id)
 		dlg_info("blinded_card::%s", bits256_str(str, b_blinded_card));
 		dealer_blind_info =
 			get_cJSON_from_id_key_vdxfid_from_height(table_id, get_key_data_vdxf_id(T_D_DECK_KEY, game_id_str), g_start_block);
-		dlg_info("dealer_blind_info::%s", cJSON_Print(dealer_blind_info));
+		DLG_JSON(info, "dealer_blind_info::%s", dealer_blind_info);
 		card_value = decode_card(b_blinded_card, blinded_value, dealer_blind_info);
+		if (bv_info) { cJSON_Delete(bv_info); bv_info = NULL; }
+		if (b_blinded_deck) { cJSON_Delete(b_blinded_deck); b_blinded_deck = NULL; }
+		if (dealer_blind_info) { cJSON_Delete(dealer_blind_info); dealer_blind_info = NULL; }
 		dlg_info("card_value ::%d", card_value);
 		if (card_value == -1) {
-			retval = ERR_CARD_DECODING_FAILED;
+			dlg_warn("Card decode failed for card_id=%d - will retry on next poll", card_id);
+			retval = OK;  // Return OK so game loop retries
 		} else {
 			// ========== CARD REVEALED ==========
 			dlg_info("╔════════════════════════════════════════╗");
@@ -268,43 +320,47 @@ int32_t reveal_card(char *table_id)
 			dlg_info("║  Type: %-10s  Card ID: %-10d ║", get_card_type_name(card_type), card_id);
 			dlg_info("╚════════════════════════════════════════╝");
 			
-			// Save decoded card to local state
-			if (card_id < hand_size) {
-				update_player_decoded_card(card_id, card_value);
-				dlg_info("Saved decoded card %d (type=%d) with value %d to local DB", 
-					card_id, card_type, card_value);
+			// Save decoded card to local state using hand position mapping
+			if (hand_idx >= 0) {
+				update_player_decoded_card(hand_idx, card_value);
+				dlg_info("Saved card_id=%d (type=%d) as hand_idx=%d with value %d to local DB",
+					card_id, card_type, hand_idx, card_value);
+			} else {
+				dlg_warn("Cannot map card_id=%d type=%d to hand position (player_id=%d, nplayers=%d)",
+					card_id, card_type, p_deck_info.player_id, num_of_players);
 			}
 
 			// Send GUI message for each card reveal
 			{
-				// Hole cards: send when we have both (card 0 and 1)
+				// Hole cards: send when we have both (always at hand positions 0 and 1)
 				if (card_type == hole_card) {
-					// This is a hole card
-					if (card_id == 1) {
-						// Second hole card - now we have both
-						int32_t card1 = p_local_state.decoded_cards[0];
-						int32_t card2 = card_value;
-						if (card1 >= 0) {
-							dlg_info("Sending hole cards to GUI: %s, %s", 
-								get_card_name(card1), get_card_name(card2));
-							cJSON *deal_msg = gui_build_deal_holecards(card1, card2, 0.0);
-							gui_send_message(deal_msg);
-							cJSON_Delete(deal_msg);
-						}
+					int32_t h1 = p_local_state.decoded_cards[0];
+					int32_t h2 = p_local_state.decoded_cards[1];
+					// Current card may not be in decoded_cards yet (DB write pending)
+					if (hand_idx == 0) h1 = card_value;
+					if (hand_idx == 1) h2 = card_value;
+					if (h1 >= 0 && h2 >= 0) {
+						dlg_info("Sending hole cards to GUI: %s, %s",
+							get_card_name(h1), get_card_name(h2));
+						cJSON *deal_msg = gui_build_deal_holecards(h1, h2, 0.0);
+						gui_send_message(deal_msg);
+						cJSON_Delete(deal_msg);
 					}
 				} else if (is_community_card(card_type)) {
-					// Board card - build array of all board cards revealed so far
-					int32_t board[5] = {-1, -1, -1, -1, -1};
+					// Board cards are at hand positions 2-6
+					int32_t board[5];
 					int32_t board_count = 0;
-					for (int i = 2; i < 7 && i < hand_size; i++) {
-						if (p_local_state.decoded_cards[i] >= 0) {
-							board[board_count++] = p_local_state.decoded_cards[i];
-						}
+					for (int i = 0; i < 5; i++) {
+						board[i] = p_local_state.decoded_cards[2 + i];
 					}
-					// Add current card if not already in local state
-					if (card_id >= 2 && card_id < 7) {
-						board[card_id - 2] = card_value;
-						board_count = card_id - 2 + 1;
+					// Current card may not be in decoded_cards yet
+					int32_t board_pos = hand_idx - 2; // hand_idx 2-6 → board_pos 0-4
+					if (board_pos >= 0 && board_pos < 5) {
+						board[board_pos] = card_value;
+					}
+					// Count how many board cards are revealed
+					for (int i = 0; i < 5; i++) {
+						if (board[i] >= 0) board_count = i + 1;
 					}
 					cJSON *deal_msg = gui_build_deal_board(board, board_count);
 					gui_send_message(deal_msg);
@@ -330,8 +386,8 @@ static int32_t handle_player_reveal_card(char *table_id)
 	game_state_info = get_game_state_info(table_id);
 
 	if (!game_state_info) {
-		// TODO:: This error needs to be handled.
-		return retval;
+		dlg_warn("game_state_info is NULL - table may not have updated yet, will retry");
+		return retval;  // Returns OK so caller retries on next poll
 	}
 	if (jint(game_state_info, "player_id") != p_deck_info.player_id) {
 		// Not this players turn
@@ -342,7 +398,7 @@ static int32_t handle_player_reveal_card(char *table_id)
 		retval = reveal_card(table_id);
 		if (retval == OK) {
 			append_game_state(player_config.verus_pid, G_REVEAL_CARD_P_DONE, game_state_info);
-			dlg_info("Updating player's revealed card info :: %s", cJSON_Print(game_state_info));
+			DLG_JSON(info, "Updating player's revealed card info :: %s", game_state_info);
 		}
 	}
 	return retval;
@@ -453,8 +509,11 @@ int32_t player_handle_betting(char *table_id)
 	// Display player funds
 	cJSON *player_funds = cJSON_GetObjectItem(betting_state, "player_funds");
 	if (player_funds && p_deck_info.player_id < cJSON_GetArraySize(player_funds)) {
-		double my_funds = cJSON_GetArrayItem(player_funds, p_deck_info.player_id)->valuedouble;
-		dlg_info("  Your funds: %.4f CHIPS", my_funds);
+		cJSON *funds_item = cJSON_GetArrayItem(player_funds, p_deck_info.player_id);
+		if (funds_item) {
+			double my_funds = funds_item->valuedouble;
+			dlg_info("  Your funds: %.4f CHIPS", my_funds);
+		}
 	}
 	
 	dlg_info("═══════════════════════════════════════════");
@@ -473,7 +532,8 @@ int32_t player_handle_betting(char *table_id)
 		cJSON *player_funds_json = cJSON_GetObjectItem(betting_state, "player_funds");
 		int32_t num_players = player_funds_json ? cJSON_GetArraySize(player_funds_json) : 0;
 		for (int i = 0; i < num_players && i < CARDS_MAXPLAYERS; i++) {
-			funds_arr[i] = cJSON_GetArrayItem(player_funds_json, i)->valuedouble;
+			cJSON *fi = cJSON_GetArrayItem(player_funds_json, i);
+			funds_arr[i] = fi ? fi->valuedouble : 0.0;
 		}
 		
 		// Calculate min raise (typically 2x the call amount or big blind)
@@ -491,9 +551,12 @@ int32_t player_handle_betting(char *table_id)
 		);
 		gui_send_message(gui_msg);
 		cJSON_Delete(gui_msg);
-		
+
 		// In GUI mode, wait for WebSocket message from GUI
 		if (g_betting_mode == BET_MODE_GUI) {
+			// Store context for the WebSocket GUI handler in client.c
+			snprintf(g_gui_betting_action, sizeof(g_gui_betting_action), "%s", action);
+			g_gui_betting_min_amount = min_amount;
 			dlg_info("Waiting for GUI action...");
 			return OK;
 		}
@@ -586,7 +649,8 @@ int32_t player_handle_betting(char *table_id)
 					cJSON *pf = cJSON_GetObjectItem(betting_state, "player_funds");
 					double my_funds = 0.0;
 					if (pf && p_deck_info.player_id < cJSON_GetArraySize(pf)) {
-						my_funds = cJSON_GetArrayItem(pf, p_deck_info.player_id)->valuedouble;
+						cJSON *my_item = cJSON_GetArrayItem(pf, p_deck_info.player_id);
+						my_funds = my_item ? my_item->valuedouble : 0.0;
 					}
 					printf("  → Going ALL-IN with %.4f CHIPS!\n", my_funds);
 					retval = player_write_betting_action(table_id, "allin", my_funds);
@@ -653,21 +717,106 @@ int32_t handle_game_state_player(char *table_id)
 	case G_ROUND_BETTING:
 		retval = player_handle_betting(table_id);
 		break;
-	case G_SHOWDOWN:
-		dlg_info("═══════════════════════════════════════════");
-		dlg_info("  🏆 SHOWDOWN - Game Complete!              ");
-		dlg_info("═══════════════════════════════════════════");
-		// Display final cards
-		for (int i = 0; i < hand_size && i < p_local_state.cards_decoded_count; i++) {
-			if (p_local_state.decoded_cards[i] >= 0) {
-				dlg_info("  Card %d: %s", i + 1, get_card_name(p_local_state.decoded_cards[i]));
+	case G_SHOWDOWN: {
+		// Only reveal hole cards once per game
+		static bits256 last_revealed_game = { 0 };
+		if (bits256_nonz(last_revealed_game) &&
+		    bits256_cmp(last_revealed_game, p_deck_info.game_id) == 0) {
+			break;
+		}
+		dlg_info("SHOWDOWN - Revealing hole cards (hand positions: 0=hole1, 1=hole2, 2-6=board)");
+		for (int i = 0; i < hand_size; i++) {
+			dlg_info("  decoded_cards[%d] = %d %s", i, p_local_state.decoded_cards[i],
+				p_local_state.decoded_cards[i] >= 0 ? get_card_name(p_local_state.decoded_cards[i]) : "(empty)");
+		}
+		// With hand position mapping: hole cards are always at positions 0 and 1
+		int32_t card1 = p_local_state.decoded_cards[0];
+		int32_t card2 = p_local_state.decoded_cards[1];
+		if (card1 >= 0 && card2 >= 0) {
+			char game_id_str[65];
+			bits256_str(game_id_str, p_deck_info.game_id);
+			cJSON *holecards = cJSON_CreateObject();
+			cJSON_AddNumberToObject(holecards, "card1", card1);
+			cJSON_AddNumberToObject(holecards, "card2", card2);
+			// Include board cards so dealer can read them at showdown
+			cJSON *board_arr = cJSON_CreateArray();
+			for (int32_t b = 2; b < hand_size; b++) {
+				cJSON_AddItemToArray(board_arr, cJSON_CreateNumber(p_local_state.decoded_cards[b]));
+			}
+			cJSON_AddItemToObject(holecards, "board", board_arr);
+			cJSON *out = poker_update_key_json(player_config.verus_pid,
+				get_key_data_vdxf_id(P_REVEALED_HOLECARDS_KEY, game_id_str),
+				holecards, true);
+			cJSON_Delete(holecards);
+			if (out) {
+				dlg_info("Revealed hole cards: %s, %s",
+					get_card_name(card1), get_card_name(card2));
+				last_revealed_game = p_deck_info.game_id;
+			} else {
+				dlg_error("Failed to reveal hole cards to blockchain");
+			}
+		} else {
+			dlg_warn("Cannot reveal hole cards - not decoded (card1=%d, card2=%d)", card1, card2);
+		}
+		break;
+	}
+	case G_SETTLEMENT_PENDING: {
+		// Read showdown results from blockchain and send to GUI
+		static bits256 last_result_game = { 0 };
+		if (bits256_nonz(last_result_game) &&
+		    bits256_cmp(last_result_game, p_deck_info.game_id) == 0) {
+			break;
+		}
+		char gid_str[65];
+		bits256_str(gid_str, p_deck_info.game_id);
+		cJSON *result = get_cJSON_from_id_key_vdxfid_from_height(
+			player_config.table_id,
+			get_key_data_vdxf_id(T_SHOWDOWN_RESULT_KEY, gid_str),
+			g_start_block);
+		if (result) {
+			cJSON *winners_arr = cJSON_GetObjectItem(result, "winners");
+			cJSON *win_amounts = cJSON_GetObjectItem(result, "win_amounts");
+			cJSON *hc_arr = cJSON_GetObjectItem(result, "holecards");
+			cJSON *board_arr = cJSON_GetObjectItem(result, "board");
+
+			if (winners_arr && hc_arr && board_arr) {
+				int32_t winner_count = cJSON_GetArraySize(winners_arr);
+				int32_t winner_list[CARDS_MAXPLAYERS];
+				double total_win = 0;
+				for (int32_t i = 0; i < winner_count && i < CARDS_MAXPLAYERS; i++) {
+					winner_list[i] = jinti(winners_arr, i);
+					if (win_amounts)
+						total_win += jdoublei(win_amounts, i);
+				}
+
+				int32_t np = cJSON_GetArraySize(hc_arr);
+				int32_t hc_data[CARDS_MAXPLAYERS][2];
+				int32_t *hc_ptrs[CARDS_MAXPLAYERS];
+				for (int32_t i = 0; i < np && i < CARDS_MAXPLAYERS; i++) {
+					cJSON *pc = cJSON_GetArrayItem(hc_arr, i);
+					hc_data[i][0] = jinti(pc, 0);
+					hc_data[i][1] = jinti(pc, 1);
+					hc_ptrs[i] = hc_data[i];
+				}
+
+				int32_t board[5] = {-1, -1, -1, -1, -1};
+				for (int32_t i = 0; i < 5 && i < cJSON_GetArraySize(board_arr); i++)
+					board[i] = jinti(board_arr, i);
+
+				cJSON *final_msg = gui_build_final_info(
+					winner_list, winner_count, total_win,
+					hc_ptrs, board, np);
+				gui_send_message(final_msg);
+				cJSON_Delete(final_msg);
+
+				dlg_info("Showdown results sent to GUI");
+				last_result_game = p_deck_info.game_id;
 			}
 		}
 		break;
+	}
 	case G_SETTLEMENT_COMPLETE:
-		dlg_info("═══════════════════════════════════════════");
-		dlg_info("  💰 PAYOUT RECEIVED - Game Finished!       ");
-		dlg_info("═══════════════════════════════════════════");
+		dlg_info("PAYOUT RECEIVED - Game Finished!");
 		break;
 	}
 	return retval;
@@ -679,6 +828,7 @@ int32_t handle_verus_player()
 	char game_id_str[65];
 
 	// Initialize local state
+	srand(time(NULL) ^ getpid());
 	init_p_local_state();
 
 	// Check if poker is ready
@@ -836,7 +986,7 @@ int32_t handle_verus_player()
 			dlg_info("Successfully loaded player deck info from local DB!");
 
 			// Load local state (payin_tx, decoded cards)
-			retval = load_player_local_state(game_id_str);
+			retval = load_player_local_state(game_id_str, p_deck_info.player_id);
 			if (retval == OK) {
 				dlg_info("Loaded local state: payin_tx=%s, cards_decoded=%d", 
 					p_local_state.payin_tx, p_local_state.cards_decoded_count);
@@ -865,8 +1015,9 @@ int32_t handle_verus_player()
 			if (retval == OK) {
 				dlg_info("Loaded existing deck info for this game from local DB");
 				// Also load local state
-				load_player_local_state(game_id_str);
-				// Skip deck init since we already have our deck
+				load_player_local_state(game_id_str, p_deck_info.player_id);
+				// Re-write game state to blockchain so dealer can detect us
+				append_game_state(player_config.verus_pid, G_DECK_SHUFFLING_P, NULL);
 			} else {
 				// No local deck info - need to initialize
 				dlg_info("No saved deck info found, initializing new deck...");
@@ -914,15 +1065,35 @@ int32_t handle_verus_player()
 	dlg_info("Player init state: %s", player_init_state_str(P_INIT_DECK_READY));
 
 	// State 7: Entering game loop
+	// Re-read num_of_players now that all players have joined.
+	// get_player_id() may have been called when only 1 player existed.
+	{
+		char *gid_str = poker_get_key_str(player_config.table_id, T_GAME_ID_KEY);
+		if (gid_str) {
+			cJSON *t_pi = get_cJSON_from_id_key_vdxfid_from_height(player_config.table_id,
+				get_key_data_vdxf_id(T_PLAYER_INFO_KEY, gid_str), g_start_block);
+			if (t_pi) {
+				cJSON *pi = jobj(t_pi, "player_info");
+				if (pi) {
+					int32_t np = cJSON_GetArraySize(pi);
+					if (np > num_of_players) {
+						dlg_info("Updated num_of_players: %d -> %d", num_of_players, np);
+						num_of_players = np;
+					}
+				}
+			}
+		}
+	}
 	send_init_state_to_gui(P_INIT_IN_GAME);
-	dlg_info("Player init state: %s - entering game loop", player_init_state_str(P_INIT_IN_GAME));
+	dlg_info("Player init state: %s - entering game loop (num_of_players=%d)", player_init_state_str(P_INIT_IN_GAME), num_of_players);
 
 	// Main game loop
 	while (1) {
 		retval = handle_game_state_player(player_config.table_id);
 		if (retval != OK) {
-			dlg_error("Error in game state handling: %s", bet_err_str(retval));
-			return retval;
+			dlg_warn("Transient error in game state handling: %s (will retry)", bet_err_str(retval));
+			// Don't exit on transient errors — card decode can fail on first attempt
+			// and succeed on retry when blockchain data becomes available
 		}
 		sleep(2);
 	}

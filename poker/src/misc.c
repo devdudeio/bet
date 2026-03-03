@@ -1,6 +1,7 @@
 #include "misc.h"
 #include "../../includes/curl/curl.h"
 #include "../../includes/curl/easy.h"
+#include <string.h>
 
 int32_t hexstr_to_str(const char *input, char *output)
 {
@@ -61,7 +62,7 @@ void delete_file(char *file_name)
 int check_url(const char *url)
 {
 	CURL *curl = NULL;
-	CURLcode response;
+	CURLcode response = CURLE_FAILED_INIT;
 
 	if ((url == NULL) || (strlen(url) == 0))
 		return 0;
@@ -80,45 +81,31 @@ int check_url(const char *url)
 
 void float_to_uint32(uint32_t *s, uint32_t *m, uint32_t *e, float number)
 {
-	uint32_t *ptr = (uint32_t *)&number;
+	uint32_t raw;
+	memcpy(&raw, &number, sizeof(raw));
 
-	*s = *ptr >> 31;
-	*e = *ptr & 0x7f800000;
-	*e >>= 23;
-	*m = *ptr & 0x007fffff;
+	*s = raw >> 31;
+	*e = (raw & 0x7f800000) >> 23;
+	*m = raw & 0x007fffff;
 }
 
 void float_to_uint32_s(struct float_num *t, float number)
 {
-	uint32_t s, e, m;
+	uint32_t raw;
+	memcpy(&raw, &number, sizeof(raw));
 
-	uint32_t *ptr = (uint32_t *)&number;
-
-	s = *ptr >> 31;
-	e = *ptr & 0x7f800000;
-	e >>= 23;
-	m = *ptr & 0x007fffff;
-
-	t->sign = s;
-	t->mantisa = m;
-	t->exponent = e;
+	t->sign = raw >> 31;
+	t->exponent = (raw & 0x7f800000) >> 23;
+	t->mantisa = raw & 0x007fffff;
 }
 
 float uint32_s_to_float(struct float_num t)
 {
-	uint32_t s, e, m;
+	uint32_t raw;
 	float number;
 
-	uint32_t *ptr = (uint32_t *)&number;
-
-	s = t.sign;
-	m = t.mantisa;
-	e = t.exponent;
-
-	s <<= 31;
-	e <<= 23;
-
-	*ptr = s | e | m;
+	raw = (t.sign << 31) | (t.exponent << 23) | t.mantisa;
+	memcpy(&number, &raw, sizeof(number));
 
 	return number;
 }

@@ -144,6 +144,29 @@ key is represented as chips.vrsc::poker.sg777z.cashiers.
 #define P_DECODED_CARD_KEY "chips.vrsc::poker.sg777z.p_decoded_card"
 
 /*
+* p_revealed_holecards - Player reveals hole cards at showdown
+* {
+*   card1: first hole card value (0-51)
+*   card2: second hole card value (0-51)
+* }
+* Dealer polls this from each non-folded player during G_SHOWDOWN
+*/
+#define P_REVEALED_HOLECARDS_KEY "chips.vrsc::poker.sg777z.p_revealed_holecards"
+
+/*
+* t_showdown_result - Dealer writes hand evaluation results at showdown
+* {
+*   winners: [seat_indices],
+*   win_amounts: [amounts per winner],
+*   holecards: [[card1, card2], ...],    // all players' hole cards
+*   board: [c1, c2, c3, c4, c5],
+*   scores: [hand_scores per player]
+* }
+* Players read this and forward to their GUI as finalInfo
+*/
+#define T_SHOWDOWN_RESULT_KEY "chips.vrsc::poker.sg777z.t_showdown_result"
+
+/*
 * t_game_info {
 * t_game_ids : 256 bit unique string in hex
 * game_info : Holds the info of the gaming state
@@ -240,8 +263,8 @@ Any entity in the bet ecosystem can register the identities under chips, like fo
 under chips as sg777.chips@ which basically been used to hold the tokens. 
 */
 
-#define CASHIERS_ID_FQN "cashier.sg777z.chips.vrsc@"
-#define DEALERS_ID_FQN "dealer.sg777z.chips.vrsc@"
+#define CASHIERS_ID_FQN "cashiers.sg777z.chips.vrsc@"
+#define DEALERS_ID_FQN "dealers.sg777z.chips.vrsc@"
 #define POKER_ID_FQN "sg777z.chips.vrsc@"
 
 #define DEALERS_ID "dealers"

@@ -10,6 +10,8 @@
 #include "config.h"
 #include "poker_vdxf.h"
 #include "storage.h"
+#include "poker.h"
+#include "gui.h"
 
 struct d_deck_info_struct d_deck_info;
 struct game_meta_info_struct game_meta_info;
@@ -57,7 +59,7 @@ int32_t add_dealer(char *dealer_id)
 	if (!out) {
 		return ERR_UPDATEIDENTITY;
 	}
-	dlg_info("%s", cJSON_Print(out));
+	DLG_JSON(info, "%s", out);
 
 	return retval;
 }
@@ -67,6 +69,11 @@ int32_t dealer_sb_deck(char *id, bits256 *player_r, int32_t player_id)
 	int32_t retval = OK;
 	char str[65], *game_id_str = NULL;
 	cJSON *d_blinded_deck = NULL;
+
+	if (player_id < 0 || player_id >= CARDS_MAXPLAYERS) {
+		dlg_error("Invalid player_id %d in dealer_sb_deck", player_id);
+		return ERR_PLAYER_NOT_EXISTS;
+	}
 
 	game_id_str = poker_get_key_str(id, T_GAME_ID_KEY);
 
@@ -92,7 +99,7 @@ int32_t dealer_sb_deck(char *id, bits256 *player_r, int32_t player_id)
 
 	if (!out)
 		retval = ERR_DECK_BLINDING_DEALER;
-	dlg_info("%s", cJSON_Print(out));
+	DLG_JSON(info, "%s", out);
 
 	return retval;
 }
@@ -294,9 +301,22 @@ int32_t dealer_shuffle_deck(char *id)
 	game_id_str = poker_get_key_str(id, T_GAME_ID_KEY);
 
 	for (int32_t i = 0; i < num_of_players; i++) {
-		cJSON *player_deck =
-			get_cJSON_from_id_key_vdxfid_from_height(player_ids[i], get_key_data_vdxf_id(PLAYER_DECK_KEY, game_id_str), g_start_block);
+		cJSON *player_deck = NULL;
+		for (int32_t attempt = 0; attempt < 5; attempt++) {
+			player_deck = get_cJSON_from_id_key_vdxfid_from_height(player_ids[i], get_key_data_vdxf_id(PLAYER_DECK_KEY, game_id_str), g_start_block);
+			if (player_deck) break;
+			dlg_warn("Player %d deck not found on chain, waiting for confirmation (attempt %d/5)", i, attempt + 1);
+			wait_for_a_blocktime();
+		}
+		if (!player_deck) {
+			dlg_error("Player %d deck not found on chain after retries", i);
+			return ERR_DECK_BLINDING_DEALER;
+		}
 		cJSON *cardinfo = cJSON_GetObjectItem(player_deck, "cardinfo");
+		if (!cardinfo) {
+			dlg_error("Player %d cardinfo missing", i);
+			return ERR_DECK_BLINDING_DEALER;
+		}
 		for (int32_t j = 0; j < cJSON_GetArraySize(cardinfo); j++) {
 			t_p_r[j] = jbits256i(cardinfo, j);
 		}
@@ -314,7 +334,7 @@ int32_t dealer_shuffle_deck(char *id)
 						       t_d_deck_info, true);
 	if (!out)
 		retval = ERR_DECK_BLINDING_DEALER;
-	dlg_info("%s", cJSON_Print(out));
+	DLG_JSON(info, "%s", out);
 
 	// Save dealer deck info to local DB for rejoin capability
 	if (retval == OK) {
@@ -403,7 +423,7 @@ int32_t dealer_initiate_settlement(struct table *t, struct privatebet_vars *vars
 	// Add cashier ID
 	cJSON_AddStringToObject(settlement_info, "cashier_id", t->cashier_id);
 	
-	dlg_info("Settlement info: %s", cJSON_Print(settlement_info));
+	DLG_JSON(info, "Settlement info: %s", settlement_info);
 	
 	// Write to table ID
 	cJSON *out = poker_update_key_json(t->table_id, 
@@ -502,34 +522,281 @@ int32_t handle_game_state(struct table *t)
 		retval = verus_handle_round_betting(t->table_id, dcv_vars);
 		break;
 	case G_SHOWDOWN:
-		dlg_info("Showdown - determining winners and pot distribution");
-		// For now, split pot among players who didn't fold
-		// TODO: Implement proper hand evaluation
+		dlg_info("═══════════════════════════════════════════");
+		dlg_info("  🏆 SHOWDOWN - Evaluating hands...         ");
+		dlg_info("═══════════════════════════════════════════");
 		{
-			int32_t active_players = 0;
+			char *gid_str = poker_get_key_str(t->table_id, T_GAME_ID_KEY);
+			if (!gid_str) {
+				dlg_error("Cannot evaluate showdown: game_id not found");
+				retval = ERR_GAME_ID_NOT_FOUND;
+				break;
+			}
+
+			// Step 1: Initialize board and holecards before any goto
+			int32_t board[5] = {-1, -1, -1, -1, -1};
+			int32_t holecards[CARDS_MAXPLAYERS][2];
+			for (int32_t i = 0; i < CARDS_MAXPLAYERS; i++) {
+				holecards[i][0] = -1;
+				holecards[i][1] = -1;
+			}
+
+			// Step 2: Determine active (non-folded) players
+			int32_t active_count = 0;
+			int32_t player_folded[CARDS_MAXPLAYERS] = {0};
 			for (int32_t i = 0; i < num_of_players; i++) {
-				// Check if player folded in any round
-				int32_t player_folded = 0;
 				for (int32_t r = 0; r < CARDS_MAXROUNDS; r++) {
 					if (dcv_vars->bet_actions[i][r] == fold) {
-						player_folded = 1;
+						player_folded[i] = 1;
 						break;
 					}
 				}
-				if (!player_folded) {
-					dcv_vars->winners[i] = 1;
-					active_players++;
+				if (!player_folded[i]) active_count++;
+			}
+			dlg_info("Active players at showdown: %d / %d", active_count, num_of_players);
+
+			// If only 1 player remains (all others folded), they win by default
+			if (active_count <= 1) {
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (!player_folded[i]) {
+						dcv_vars->winners[i] = 1;
+						dcv_vars->win_funds[i] = dcv_vars->pot;
+						dlg_info("Player %d (%s) wins %.4f CHIPS by default (all others folded)",
+							i, player_ids[i], dcv_vars->pot);
+					}
+				}
+				goto showdown_finalize;
+			}
+
+			// Step 3: Poll each active player for revealed hole cards
+			int32_t holecards_ready = 0;
+			int32_t poll_attempts = 0;
+
+			while (holecards_ready < active_count && poll_attempts < 30) {
+				holecards_ready = 0;
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (player_folded[i]) {
+						holecards_ready++;
+						continue;
+					}
+					if (holecards[i][0] >= 0) {
+						holecards_ready++;
+						continue;
+					}
+					cJSON *revealed = get_cJSON_from_id_key_vdxfid_from_height(
+						player_ids[i],
+						get_key_data_vdxf_id(P_REVEALED_HOLECARDS_KEY, gid_str),
+						g_start_block);
+					if (revealed) {
+						holecards[i][0] = jint(revealed, "card1");
+						holecards[i][1] = jint(revealed, "card2");
+						if (holecards[i][0] >= 0 && holecards[i][1] >= 0) {
+							dlg_info("Player %d (%s) hole cards: %s %s",
+								i, player_ids[i],
+								card_value_to_string(holecards[i][0]),
+								card_value_to_string(holecards[i][1]));
+							holecards_ready++;
+							// Extract board cards from first player that reveals
+							if (board[0] < 0) {
+								cJSON *board_arr = cJSON_GetObjectItem(revealed, "board");
+								if (board_arr && cJSON_GetArraySize(board_arr) >= 5) {
+									for (int32_t b = 0; b < 5; b++) {
+										cJSON *card_item = cJSON_GetArrayItem(board_arr, b);
+										board[b] = card_item ? card_item->valueint : -1;
+									}
+									dlg_info("Board cards from player %d: %s %s %s %s %s",
+										i,
+										card_value_to_string(board[0]),
+										card_value_to_string(board[1]),
+										card_value_to_string(board[2]),
+										card_value_to_string(board[3]),
+										card_value_to_string(board[4]));
+								}
+							}
+						}
+					}
+				}
+				if (holecards_ready < num_of_players) {
+					dlg_info("Waiting for hole card reveals: %d/%d ready", holecards_ready, num_of_players);
+					sleep(2);
+					poll_attempts++;
 				}
 			}
-			// Split pot among winners (pot already in CHIPS)
-			if (active_players > 0) {
-				double share = dcv_vars->pot / active_players;
+
+			// If some players didn't reveal, treat them as folded
+			for (int32_t i = 0; i < num_of_players; i++) {
+				if (!player_folded[i] && holecards[i][0] < 0) {
+					dlg_warn("Player %d (%s) didn't reveal hole cards - treating as fold",
+						i, player_ids[i]);
+					player_folded[i] = 1;
+					active_count--;
+				}
+			}
+
+			// If only 1 active player left after reveal timeout
+			if (active_count <= 1) {
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (!player_folded[i]) {
+						dcv_vars->winners[i] = 1;
+						dcv_vars->win_funds[i] = dcv_vars->pot;
+						dlg_info("Player %d (%s) wins %.4f CHIPS (others didn't reveal)",
+							i, player_ids[i], dcv_vars->pot);
+					}
+				}
+				goto showdown_finalize;
+			}
+
+			// Step 4: Evaluate hands using seven_card_draw_score()
+			unsigned long scores[CARDS_MAXPLAYERS];
+			for (int32_t i = 0; i < num_of_players; i++) {
+				if (player_folded[i]) {
+					scores[i] = 0;
+				} else {
+					unsigned char h[7];
+					h[0] = (unsigned char)holecards[i][0];
+					h[1] = (unsigned char)holecards[i][1];
+					h[2] = (unsigned char)board[0];
+					h[3] = (unsigned char)board[1];
+					h[4] = (unsigned char)board[2];
+					h[5] = (unsigned char)board[3];
+					h[6] = (unsigned char)board[4];
+					scores[i] = seven_card_draw_score(h);
+					dlg_info("Player %d (%s): hand [%s %s | %s %s %s %s %s] score=%lu",
+						i, player_ids[i],
+						card_value_to_string(holecards[i][0]),
+						card_value_to_string(holecards[i][1]),
+						card_value_to_string(board[0]),
+						card_value_to_string(board[1]),
+						card_value_to_string(board[2]),
+						card_value_to_string(board[3]),
+						card_value_to_string(board[4]),
+						scores[i]);
+				}
+			}
+
+			// Step 5: Pot distribution with side pot support
+			// (adapted from host.c det_dcv_pot_split)
+			int32_t eval_players[CARDS_MAXPLAYERS] = {0};
+			for (int32_t i = 0; i < num_of_players; i++) {
+				dcv_vars->funds_spent[i] = 0;
+				for (int32_t j = 0; j <= dcv_vars->round; j++) {
+					dcv_vars->funds_spent[i] += dcv_vars->betamount[i][j];
+				}
+			}
+
+			int32_t flag = 1;
+			while (flag) {
+				unsigned long max_score = 0;
+				int32_t no_of_winners = 0;
+				double min_win_amount = dcv_vars->pot;
+
+				// Find highest score among unevaluated players
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (eval_players[i] == 0 && max_score < scores[i])
+						max_score = scores[i];
+				}
+
+				// Find winners and minimum funds_spent among them
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (eval_players[i] == 0 && scores[i] == max_score && !player_folded[i]) {
+						dcv_vars->winners[i] = 1;
+						no_of_winners++;
+						if (min_win_amount > dcv_vars->funds_spent[i])
+							min_win_amount = dcv_vars->funds_spent[i];
+					}
+				}
+
+				// Build sub-pot: each unevaluated player contributes up to min_win_amount
+				double sub_pot = 0;
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (eval_players[i] == 0) {
+						if (dcv_vars->funds_spent[i] >= min_win_amount) {
+							sub_pot += min_win_amount;
+							dcv_vars->funds_spent[i] -= min_win_amount;
+						} else {
+							sub_pot += dcv_vars->funds_spent[i];
+							dcv_vars->funds_spent[i] = 0;
+						}
+					}
+				}
+
+				// Split sub-pot among winners
+				if (no_of_winners > 0) {
+					double share = sub_pot / no_of_winners;
+					for (int32_t i = 0; i < num_of_players; i++) {
+						if (dcv_vars->winners[i] == 1) {
+							dcv_vars->win_funds[i] += share;
+						}
+						if (dcv_vars->funds_spent[i] == 0) {
+							eval_players[i] = 1;
+						}
+					}
+				}
+
+				// Check if any unevaluated players remain
+				flag = 0;
+				int32_t eval_left = 0, last_eval = 0;
+				for (int32_t i = 0; i < num_of_players; i++) {
+					if (eval_players[i] == 0) {
+						flag = 1;
+						eval_left++;
+						last_eval = i;
+					}
+				}
+				// If only 1 player left, give them their remaining funds
+				if (eval_left == 1) {
+					dcv_vars->win_funds[last_eval] += dcv_vars->funds_spent[last_eval];
+					dcv_vars->funds_spent[last_eval] = 0;
+					flag = 0;
+				}
+			}
+
+			// Log results
+			for (int32_t i = 0; i < num_of_players; i++) {
+				dlg_info("Player %d (%s): winner=%d, win_funds=%.4f, remaining_funds=%.4f",
+					i, player_ids[i], dcv_vars->winners[i],
+					dcv_vars->win_funds[i], dcv_vars->funds[i]);
+			}
+
+showdown_finalize:
+			// Step 6: Write showdown results to blockchain for players to read
+			{
+				cJSON *result_json = cJSON_CreateObject();
+
+				cJSON *winners_arr = cJSON_CreateArray();
+				cJSON *win_amounts_arr = cJSON_CreateArray();
 				for (int32_t i = 0; i < num_of_players; i++) {
 					if (dcv_vars->winners[i] == 1) {
-						dcv_vars->win_funds[i] = share;
-						dlg_info("Player %d (%s): wins %.4f CHIPS", 
-							i, player_ids[i], share);
+						cJSON_AddItemToArray(winners_arr, cJSON_CreateNumber(i));
+						cJSON_AddItemToArray(win_amounts_arr,
+							cJSON_CreateNumber(dcv_vars->win_funds[i]));
 					}
+				}
+				cJSON_AddItemToObject(result_json, "winners", winners_arr);
+				cJSON_AddItemToObject(result_json, "win_amounts", win_amounts_arr);
+
+				cJSON *hc_arr = cJSON_CreateArray();
+				for (int32_t i = 0; i < num_of_players; i++) {
+					cJSON *pc = cJSON_CreateArray();
+					cJSON_AddItemToArray(pc, cJSON_CreateNumber(holecards[i][0]));
+					cJSON_AddItemToArray(pc, cJSON_CreateNumber(holecards[i][1]));
+					cJSON_AddItemToArray(hc_arr, pc);
+				}
+				cJSON_AddItemToObject(result_json, "holecards", hc_arr);
+
+				cJSON *board_arr = cJSON_CreateArray();
+				for (int32_t i = 0; i < 5; i++)
+					cJSON_AddItemToArray(board_arr, cJSON_CreateNumber(board[i]));
+				cJSON_AddItemToObject(result_json, "board", board_arr);
+
+				cJSON *out = poker_update_key_json(t->table_id,
+					get_key_data_vdxf_id(T_SHOWDOWN_RESULT_KEY, gid_str),
+					result_json, true);
+				cJSON_Delete(result_json);
+				if (out) {
+					dlg_info("Showdown results written to blockchain");
+				} else {
+					dlg_error("Failed to write showdown results");
 				}
 			}
 		}
@@ -722,8 +989,10 @@ int32_t dealer_init_with_reset(struct table t)
 	}
 
 	dlg_info("Dealer ready (RESET). Table: %s, Dealer: %s, Cashier: %s", t.table_id, t.dealer_id, t.cashier_id);
+	dlg_info("Waiting for reset to propagate on chain...");
+	wait_for_a_blocktime();  // Ensure identity queries reflect the new game state
 	dlg_info("Waiting for players to join via cashier...");
-	
+
 	while (1) {
 		retval = handle_game_state(&t);
 		if (retval)

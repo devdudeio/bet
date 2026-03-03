@@ -38,7 +38,24 @@ int32_t load_dealer_deck_info(const char *game_id_str);
 void init_p_local_state(void);
 int32_t save_player_local_state(const char *payin_tx);
 int32_t update_player_decoded_card(int32_t card_index, int32_t card_value);
-int32_t load_player_local_state(const char *game_id_str);
+int32_t load_player_local_state(const char *game_id_str, int32_t player_id);
 char *get_player_payin_tx(const char *game_id_str);
+
+// Parameterized query helpers (SQL injection safe)
+int32_t bet_sql_update_c_tx_payout(const char *tx_info, const char *table_id_val);
+int32_t bet_sql_insert_cashier_game_state(const char *table_id_val, const char *game_state_val);
+int32_t bet_sql_update_player_tx_status(const char *tx_id_val, int new_status);
+int32_t bet_sql_update_c_tx_by_payin(const char *payout_tx_id, const char *payin_tx_id);
+int32_t bet_sql_insert_dealer(const char *ip);
+int32_t bet_sql_update_player_tx_payout(const char *payout_tx, const char *tx_id_val, int new_status);
+int32_t bet_sql_insert_dcv_tx(const char *tx_info, const char *table_id_val, const char *player_id,
+	const char *msig_addr, int status, int min_cashiers);
+int32_t bet_sql_update_dcv_tx_status(const char *table_id_val);
+int32_t bet_sql_insert_player_tx(const char *tx_id_val, const char *table_id_val, const char *player_id,
+	const char *msig_addr, int status, int min_cashiers);
+int32_t bet_sql_insert_c_tx_addr(const char *payin_tx_id, const char *msig_addr, int min_notaries,
+	const char *table_id_val, const char *msig_addr_nodes, int payin_status);
+int32_t bet_sql_update_player_tx_payout_by_table(const char *tx_info, const char *table_id_val, int new_status);
+int32_t bet_sql_insert_game_state(const char *table_name, const char *table_id_val, const char *game_state_val);
 
 #endif /* STORAGE_H */

@@ -270,19 +270,28 @@ void bet_parse_cashier_config_ini_file()
 		notary_node_ips = (char **)malloc(no_of_notaries * sizeof(char *));
 		notary_node_pubkeys = (char **)malloc(no_of_notaries * sizeof(char *));
 		notary_status = (int *)malloc(no_of_notaries * sizeof(int));
+		if (!notary_node_ips || !notary_node_pubkeys || !notary_status) {
+			dlg_error("Failed to allocate notary arrays");
+			free(notary_node_ips); free(notary_node_pubkeys); free(notary_status);
+			return;
+		}
 
 		for (int32_t i = 0; i < no_of_notaries; i++) {
-			cJSON *node_info = cJSON_CreateObject();
-			node_info = cJSON_GetArrayItem(cashiers_info, i);
+			cJSON *node_info = cJSON_GetArrayItem(cashiers_info, i);
 
-			notary_node_ips[i] = (char *)malloc(strlen(jstr(node_info, "ip")) + 1);
-			memset(notary_node_ips[i], 0x00, strlen(jstr(node_info, "ip")) + 1);
+			const char *ip_str = node_info ? jstr(node_info, "ip") : NULL;
+			const char *pk_str = node_info ? jstr(node_info, "pubkey") : NULL;
+			if (!ip_str || !pk_str) {
+				dlg_error("Missing ip or pubkey for notary %d", i);
+				notary_node_ips[i] = NULL;
+				notary_node_pubkeys[i] = NULL;
+				continue;
+			}
 
-			notary_node_pubkeys[i] = (char *)malloc(strlen(jstr(node_info, "pubkey")) + 1);
-			memset(notary_node_pubkeys[i], 0x00, strlen(jstr(node_info, "pubkey")) + 1);
-
-			strncpy(notary_node_ips[i], jstr(node_info, "ip"), strlen(jstr(node_info, "ip")));
-			strncpy(notary_node_pubkeys[i], jstr(node_info, "pubkey"), strlen(jstr(node_info, "pubkey")));
+			notary_node_ips[i] = calloc(1, strlen(ip_str) + 1);
+			notary_node_pubkeys[i] = calloc(1, strlen(pk_str) + 1);
+			if (notary_node_ips[i]) strcpy(notary_node_ips[i], ip_str);
+			if (notary_node_pubkeys[i]) strcpy(notary_node_pubkeys[i], pk_str);
 		}
 		int port = iniparser_getint(ini, "cashier:gui_ws_port", DEFAULT_CASHIER_WS_PORT);
 		if (port > 0 && port <= 65535) {
@@ -311,6 +320,7 @@ void bet_display_cashier_hosted_gui()
 			memset(str, 0x00, sizeof(str));
 			snprintf(str, sizeof(str), "gui:cashier-%d", ++i);
 		}
+		iniparser_freedict(ini);
 	}
 }
 
@@ -336,6 +346,7 @@ bool bet_is_new_block_set()
 	bool is_new_block_set = false;
 
 	struct passwd *pw = getpwuid(getuid());
+	if (!pw) return false;
 	const char *homedir = pw->pw_dir;
 
 	char *config_file = NULL;
@@ -372,7 +383,8 @@ void bet_parse_blockchain_config_ini_file()
 			strncpy(blockchain_cli, iniparser_getstring(ini, "blockchain:blockchain_cli", "chips-cli"),
 				sizeof(blockchain_cli));
 			if (!((strcmp(blockchain_cli, chips_cli) == 0) ||
-			      (strcmp(blockchain_cli, verus_chips_cli) == 0))) {
+			      (strstr(blockchain_cli, verus_chips_cli) != NULL) ||
+			      (strstr(blockchain_cli, verus_testnet_cli) != NULL))) {
 				dlg_warn(
 					"The blockchain client configured in ./config/blockchain_config.ini is not in the supported list of clients, so setting it do default chips-cli");
 				memset(blockchain_cli, 0x00, sizeof(blockchain_cli));
@@ -484,19 +496,23 @@ int32_t bet_parse_verus_player()
 
 	if (NULL != iniparser_getstring(ini, "verus:dealer_id", NULL)) {
 		strncpy(player_config.dealer_id, iniparser_getstring(ini, "verus:dealer_id", NULL),
-			sizeof(player_config.dealer_id));
+			sizeof(player_config.dealer_id) - 1);
+		player_config.dealer_id[sizeof(player_config.dealer_id) - 1] = '\0';
 	}
 	if (NULL != iniparser_getstring(ini, "verus:table_id", NULL)) {
 		strncpy(player_config.table_id, iniparser_getstring(ini, "verus:table_id", NULL),
-			sizeof(player_config.table_id));
+			sizeof(player_config.table_id) - 1);
+		player_config.table_id[sizeof(player_config.table_id) - 1] = '\0';
 	}
 	if (NULL != iniparser_getstring(ini, "verus:wallet_addr", NULL)) {
 		strncpy(player_config.wallet_addr, iniparser_getstring(ini, "verus:wallet_addr", NULL),
-			sizeof(player_config.wallet_addr));
+			sizeof(player_config.wallet_addr) - 1);
+		player_config.wallet_addr[sizeof(player_config.wallet_addr) - 1] = '\0';
 	}
 	if (NULL != iniparser_getstring(ini, "verus:player_id", NULL)) {
 		strncpy(player_config.verus_pid, iniparser_getstring(ini, "verus:player_id", NULL),
-			sizeof(player_config.verus_pid));
+			sizeof(player_config.verus_pid) - 1);
+		player_config.verus_pid[sizeof(player_config.verus_pid) - 1] = '\0';
 	}
 	// Read WebSocket port for GUI mode (default: 9001)
 	player_config.ws_port = iniparser_getint(ini, "verus:ws_port", DEFAULT_PLAYER_WS_PORT);
